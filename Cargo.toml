@@ -1,0 +1,13 @@
+[package]
+name = "oxcart"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+
+[dev-dependencies]
+expect-test = "1.4.0"
+
+# [[bench]]
+# name = "bench"
+# harness = false
