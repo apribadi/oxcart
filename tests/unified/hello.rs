@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
 #[test]
-fn hello() {
+fn test_hello() {
   expect!["Hello!"].assert_eq(&format!("Hello!"));
 }

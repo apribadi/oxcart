@@ -1,3 +1,2 @@
-#![no_std]
-
+mod prelude;
 pub mod arena;
