@@ -5,8 +5,10 @@ use crate::prelude::*;
 // - smaller footprint chunks field w/o RefCell
 // - configurable MIN_CHUNK_SIZE
 
+const MIN_CHUNK_SIZE_LOG2: u8 = 16;
+const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
 const MAX_OBJECT_ALIGN: usize = 64;
-const MAX_OBJECT_SIZE: usize = 1 << (usize::BITS - 2);
+const MAX_OBJECT_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 
 pub struct Arena {
   chunk_offset: Cell<isize>,
@@ -17,15 +19,15 @@ pub struct Arena {
 
 pub struct ArenaSlot<'a, T>(&'a mut MaybeUninit<T>);
 
-pub struct ArenaSliceSlots<'a, T>(&'a mut [MaybeUninit<T>]);
+pub struct ArenaSliceSlot<'a, T>(&'a mut [MaybeUninit<T>]);
 
 struct ChunkSizeClass(u8);
 
 impl ChunkSizeClass {
-  const MIN: Self = Self(16);
-  const MAX: Self = Self(usize::BITS as u8 - 2);
+  const MIN: Self = Self(MIN_CHUNK_SIZE_LOG2);
+  const MAX: Self = Self(MAX_CHUNK_SIZE_LOG2);
 
-  // `1 <= size < isize::MAX`
+  // `1 <= size <= isize::MAX`
 
   #[inline]
   fn size(self) -> usize {
@@ -41,12 +43,6 @@ impl ChunkSizeClass {
     } else {
       Some(Self((usize::BITS - (n - 1).leading_zeros()) as u8))
     }
-  }
-}
-
-impl Drop for Arena {
-  fn drop(&mut self) {
-    self.reset()
   }
 }
 
@@ -78,7 +74,7 @@ impl Arena {
     let chunk_layout = Layout::from_size_align(chunk_size, MAX_OBJECT_ALIGN).unwrap();
     let total_reserved = total_reserved.checked_add(chunk_size).unwrap();
 
-    // SAFETY: `ChunkSizeClass` guarantees that the associated size is
+    // SAFETY: `ChunkSizeClass` guarantees that its associated size is
     // positive.
 
     let chunk_base = unsafe { alloc::alloc(chunk_layout) };
@@ -120,44 +116,41 @@ impl Arena {
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&self, len: usize) -> ArenaSliceSlots<'_, T> {
+  pub fn alloc_slice<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
     let align = mem::align_of::<T>();
+    let element_size = mem::size_of::<T>();
+    let max_len = MAX_OBJECT_SIZE / element_size;
 
     assert!(align <= MAX_OBJECT_ALIGN);
 
-    let (size, is_overflow) = mem::size_of::<T>().overflowing_mul(len);
+    if len > max_len { return self.alloc_slice_slow_path_too_long(len); }
 
-    if is_overflow || size > MAX_OBJECT_SIZE {
-      return self.alloc_slice_slow_path_too_large(len);
-    }
-
+    let size = element_size * len;
     let offset = self.chunk_offset.get();
     let base = self.chunk_base.get();
     let offset = offset - (size as isize);
     let offset = offset & ((! (align - 1)) as isize);
 
-    if offset < 0 {
-      return self.alloc_slice_slow_path_add_chunk(len);
-    }
+    if offset < 0 { return self.alloc_slice_slow_path_add_chunk(len); }
 
     self.chunk_offset.set(offset);
 
     let slot = base.wrapping_offset(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { slice::from_raw_parts_mut(slot, len) };
 
-    ArenaSliceSlots(slot)
+    ArenaSliceSlot(slot)
   }
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_path_too_large<T>(&self, len: usize) -> ArenaSliceSlots<'_, T> {
+  pub fn alloc_slice_slow_path_too_long<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
     let _ = len;
     panic!()
   }
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_path_add_chunk<T>(&self, len: usize) -> ArenaSliceSlots<'_, T> {
+  pub fn alloc_slice_slow_path_add_chunk<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
     self.add_chunk_with_size_at_least(mem::size_of::<T>().checked_mul(len).unwrap());
     self.alloc_slice(len)
   }
@@ -169,6 +162,12 @@ impl Arena {
   }
 }
 
+impl Drop for Arena {
+  fn drop(&mut self) {
+    self.reset()
+  }
+}
+
 impl<'a, T> ArenaSlot<'a, T> {
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
@@ -176,21 +175,16 @@ impl<'a, T> ArenaSlot<'a, T> {
   }
 }
 
-impl<'a, T> ArenaSliceSlots<'a, T> {
+impl<'a, T> ArenaSliceSlot<'a, T> {
   #[inline(always)]
-  pub fn init<F>(self, f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
-    let slots = self.0;
-    let mut f = f;
-
-    for (i, slot) in slots.iter_mut().enumerate() {
-      slot.write(f(i));
+  pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
+    for (i, p) in self.0.iter_mut().enumerate() {
+      p.write(f(i));
     }
 
-    // TODO: Use `slice_assume_init_mut` after it's stabilized.
+    let slot = self.0 as *mut [MaybeUninit<T>] as *mut [T];
 
-    let slots = slots as *mut [MaybeUninit<T>] as *mut [T];
-
-    unsafe { &mut *slots }
+    unsafe { &mut *slot }
   }
 }
 
@@ -198,6 +192,6 @@ pub fn foo(arena: &mut Arena, x: i64) -> &mut i64 {
   arena.alloc().init(x)
 }
 
-pub fn bar(arena: &mut Arena, n: usize, x: i64) -> &mut [i64] {
-  arena.alloc_slice(n).init(|_| x)
+pub fn bar<'a, 'b>(arena: &'a mut Arena, x: &'b [i64]) -> &'a mut [i64] {
+  arena.alloc_slice(x.len()).init(|i| x[i])
 }
