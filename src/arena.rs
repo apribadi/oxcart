@@ -1,25 +1,29 @@
 use crate::prelude::*;
 
-// TODO:
-//
-// - smaller footprint chunks field w/o RefCell
-// - configurable MIN_CHUNK_SIZE
-
+const CHUNK_ALIGN_LOG2: u8 = 6;
+const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
 const MIN_CHUNK_SIZE_LOG2: u8 = 16;
 const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
-const MAX_OBJECT_ALIGN: usize = 64;
-const MAX_OBJECT_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
+const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
+const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
+const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
 pub struct Arena {
-  chunk_offset: Cell<isize>,
-  chunk_base: Cell<*mut u8>,
-  total_reserved: Cell<usize>,
-  chunks: RefCell<Vec<(*mut u8, Layout)>>,
+  total_reserved: usize,
+  chunks: Vec<Chunk>,
+}
+
+pub struct ArenaAllocator<'a> {
+  offset: isize,
+  base: *mut u8,
+  arena: &'a mut Arena,
 }
 
 pub struct ArenaSlot<'a, T>(&'a mut MaybeUninit<T>);
 
 pub struct ArenaSliceSlot<'a, T>(&'a mut [MaybeUninit<T>]);
+
+struct Chunk { base: *mut u8, size: usize, }
 
 struct ChunkSizeClass(u8);
 
@@ -49,58 +53,112 @@ impl ChunkSizeClass {
 impl Arena {
   pub fn new() -> Self {
     Self {
-      chunk_offset: Cell::new(0),
-      chunk_base: Cell::new(ptr::null_mut()),
-      total_reserved: Cell::new(0),
-      chunks: RefCell::new(Vec::new()),
+      total_reserved: 0,
+      chunks: Vec::new(),
+    }
+  }
+
+  pub fn reset(&mut self) {
+    if self.total_reserved > 0 {
+      self.reset_slow();
     }
   }
 
   #[inline(never)]
-  fn add_chunk_with_size_at_least(&self, n: usize) {
-    // If we don't need to do any large allocations, we'll get a sequence of
+  #[cold]
+  fn reset_slow(&mut self) {
+    // SAFETY:
+    //
+    // - Because this method is called with `&mut self`, we know that every
+    //   lifetime of a reference to a previously allocated slot has ended. It
+    //   follows that it is safe to deallocate the chunks' memory.
+    // - The `layout` is the same as in `alloc_chunk`, so it is valid.
+    // - The `base` pointer was returned from `alloc::alloc` in `alloc_chunk`.
+
+    self.total_reserved = 0;
+
+    for Chunk { base, size } in self.chunks.drain(..) {
+      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+
+      unsafe { alloc::dealloc(base, layout) }
+    }
+  }
+
+  pub fn allocator(&mut self) -> ArenaAllocator<'_> {
+    self.reset();
+
+    ArenaAllocator { offset: 0, base: ptr::null_mut(), arena: self, }
+  }
+
+  #[inline(never)]
+  #[cold]
+  fn alloc_chunk(&mut self, at_least: usize) -> Chunk {
+    let total_reserved = self.total_reserved;
+
+    // If we don't do any large single allocations, we'll get a sequence of
     // chunk sizes that looks like
     //
     //   1, 1, 1, 1, 2, 2, 4, 4, 8, 8, ...
     //
     // as multiples of the minimum chunk size.
 
-    let total_reserved = self.total_reserved.get();
+    let at_least = cmp::max(at_least, total_reserved / 4 + 1);
+    let size_class = ChunkSizeClass::with_size_at_least(at_least).unwrap();
+    let size = size_class.size();
+    let total_reserved = total_reserved.checked_add(size).unwrap();
 
-    let at_least = cmp::max(n, total_reserved / 4 + 1);
-    let chunk_size_class = ChunkSizeClass::with_size_at_least(at_least).unwrap();
-    let chunk_size = chunk_size_class.size();
-    let chunk_offset = chunk_size.try_into().unwrap();
-    let chunk_layout = Layout::from_size_align(chunk_size, MAX_OBJECT_ALIGN).unwrap();
-    let total_reserved = total_reserved.checked_add(chunk_size).unwrap();
+    // SAFETY:
+    //
+    // - `CHUNK_ALIGN != 0`
+    // - `CHUNK_ALIGN` is a power of two
+    // - `size` rounded up to a multiple of `CHUNK_ALIGN` is `<= isize::MAX`
 
-    // SAFETY: `ChunkSizeClass` guarantees that its associated size is
-    // positive.
+    let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
 
-    let chunk_base = unsafe { alloc::alloc(chunk_layout) };
+    // SAFETY:
+    //
+    // - `size != 0`
 
-    self.chunk_offset.set(chunk_offset);
-    self.chunk_base.set(chunk_base);
-    self.total_reserved.set(total_reserved);
-    self.chunks.borrow_mut().push((chunk_base, chunk_layout));
+    let base = unsafe { alloc::alloc(layout) };
+
+    self.total_reserved = total_reserved;
+    self.chunks.push(Chunk { base, size });
+
+    Chunk { base, size }
+  }
+}
+
+impl Drop for Arena {
+  fn drop(&mut self) {
+    self.reset()
+  }
+}
+
+impl<'a> ArenaAllocator<'a> {
+  fn alloc_chunk(&mut self, at_least: usize) {
+    let Chunk { base, size } = self.arena.alloc_chunk(at_least);
+
+    self.offset = size as isize; // NB: `size <= isize::MAX`
+    self.base = base;
   }
 
   #[inline(always)]
-  pub fn alloc<T>(&self) -> ArenaSlot<'_, T> {
+  pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
     let align = mem::align_of::<T>();
     let size = mem::size_of::<T>();
 
     assert!(align <= MAX_OBJECT_ALIGN);
     assert!(size <= MAX_OBJECT_SIZE);
 
-    let offset = self.chunk_offset.get();
-    let base = self.chunk_base.get();
+    let offset = self.offset;
+    let base = self.base;
+
     let offset = offset - (size as isize);
     let offset = offset & ((! (align - 1)) as isize);
 
-    if offset < 0 { return self.alloc_slow_path_add_chunk(); }
+    if offset < 0 { return self.alloc_slow(); }
 
-    self.chunk_offset.set(offset);
+    self.offset = offset;
 
     let slot = base.wrapping_offset(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { &mut *slot };
@@ -110,30 +168,30 @@ impl Arena {
 
   #[inline(never)]
   #[cold]
-  fn alloc_slow_path_add_chunk<T>(&self) -> ArenaSlot<'_, T> {
-    self.add_chunk_with_size_at_least(mem::size_of::<T>());
+  fn alloc_slow<T>(&mut self) -> ArenaSlot<'a, T> {
+    self.alloc_chunk(mem::size_of::<T>());
     self.alloc()
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'_, T> {
     let align = mem::align_of::<T>();
-    let element_size = mem::size_of::<T>();
-    let max_len = MAX_OBJECT_SIZE / element_size;
+    let size_of_element = mem::size_of::<T>();
+    let max_len = MAX_OBJECT_SIZE / size_of_element;
 
     assert!(align <= MAX_OBJECT_ALIGN);
 
-    if len > max_len { return self.alloc_slice_slow_path_too_long(len); }
+    if len > max_len { match self.alloc_slice_slow_slice_too_long(len) { } }
 
-    let size = element_size * len;
-    let offset = self.chunk_offset.get();
-    let base = self.chunk_base.get();
-    let offset = offset - (size as isize);
+    let offset = self.offset;
+    let base = self.base;
+
+    let offset = offset - ((size_of_element * len) as isize);
     let offset = offset & ((! (align - 1)) as isize);
 
-    if offset < 0 { return self.alloc_slice_slow_path_add_chunk(len); }
+    if offset < 0 { return self.alloc_slice_slow_alloc_chunk(len); }
 
-    self.chunk_offset.set(offset);
+    self.offset = offset;
 
     let slot = base.wrapping_offset(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { slice::from_raw_parts_mut(slot, len) };
@@ -143,28 +201,16 @@ impl Arena {
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_path_too_long<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
+  pub fn alloc_slice_slow_slice_too_long(&mut self, len: usize) -> ! {
     let _ = len;
     panic!()
   }
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_path_add_chunk<T>(&self, len: usize) -> ArenaSliceSlot<'_, T> {
-    self.add_chunk_with_size_at_least(mem::size_of::<T>().checked_mul(len).unwrap());
+  pub fn alloc_slice_slow_alloc_chunk<T>(&mut self, len: usize) -> ArenaSliceSlot<'_, T> {
+    self.alloc_chunk(mem::size_of::<T>() * len);
     self.alloc_slice(len)
-  }
-
-  pub fn reset(&mut self) {
-    for (chunk, layout) in self.chunks.take().drain(..) {
-      unsafe { alloc::dealloc(chunk, layout) }
-    }
-  }
-}
-
-impl Drop for Arena {
-  fn drop(&mut self) {
-    self.reset()
   }
 }
 
@@ -178,8 +224,8 @@ impl<'a, T> ArenaSlot<'a, T> {
 impl<'a, T> ArenaSliceSlot<'a, T> {
   #[inline(always)]
   pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
-    for (i, p) in self.0.iter_mut().enumerate() {
-      p.write(f(i));
+    for (i, element) in self.0.iter_mut().enumerate() {
+      element.write(f(i));
     }
 
     let slot = self.0 as *mut [MaybeUninit<T>] as *mut [T];
@@ -187,11 +233,8 @@ impl<'a, T> ArenaSliceSlot<'a, T> {
     unsafe { &mut *slot }
   }
 }
-
-pub fn foo(arena: &mut Arena, x: i64) -> &mut i64 {
-  arena.alloc().init(x)
-}
-
-pub fn bar<'a, 'b>(arena: &'a mut Arena, x: &'b [i64]) -> &'a mut [i64] {
-  arena.alloc_slice(x.len()).init(|i| x[i])
+pub fn bar<'a>(alloc: &mut ArenaAllocator<'a>, x: i64) {
+  for _ in 0 .. 100 {
+    let _ = alloc.alloc().init(x);
+  }
 }
