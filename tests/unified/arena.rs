@@ -2,33 +2,27 @@ use crate::prelude::*;
 
 #[test]
 fn test_arena() {
-  let mut arena = Arena::new();
+  Arena::with(|mut arena| {
+    let x = arena.alloc().init(0);
+    let y = arena.alloc().init(0);
+    let z = arena.alloc().init(0);
 
-  let mut aa = arena.allocator();
+    *x = 1;
+    *y = 2;
+    *z = 3;
 
-  let x = aa.alloc().init(0);
-  let y = aa.alloc().init(0);
-  let z = aa.alloc().init(0);
+    assert!(*x + *y + *z == 6);
+  });
+}
 
-  *x = 1;
-  *y = 2;
-  *z = 3;
-
-  drop(aa);
-
-  assert!(*x + *y + *z == 6);
-
-  let mut aa = arena.allocator();
-
-  let x = aa.alloc().init(0);
-  let y = aa.alloc().init(0);
-  let z = aa.alloc().init(0);
-
-  *x = 1;
-  *y = 2;
-  *z = 3;
-
-  assert!(*x + *y + *z == 6);
-
-  drop(aa);
+#[test]
+fn test_send_sync() {
+  fn drop_send_sync<T: Send + Sync>(_ : T) { }
+  Arena::with(|mut arena| {
+    let x = arena.alloc::<i64>();
+    let y = arena.alloc_slice::<i64>(2);
+    drop_send_sync(arena);
+    drop_send_sync(x);
+    drop_send_sync(y);
+  })
 }

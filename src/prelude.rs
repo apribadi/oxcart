@@ -4,4 +4,3 @@ pub use core::mem::MaybeUninit;
 pub use core::mem;
 pub use core::ptr;
 pub use core::slice;
-pub use std::alloc;

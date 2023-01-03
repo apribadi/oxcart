@@ -8,15 +8,10 @@ const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
-pub struct Arena {
-  total_reserved: usize,
-  chunks: Vec<Chunk>,
-}
-
-pub struct ArenaAllocator<'a> {
+pub struct Arena<'a> {
   offset: isize,
   base: *mut u8,
-  arena: &'a mut Arena,
+  store: &'a mut Store,
 }
 
 pub struct ArenaSlot<'a, T>(&'a mut MaybeUninit<T>);
@@ -27,19 +22,33 @@ struct Chunk { base: *mut u8, size: usize, }
 
 struct ChunkSizeClass(u8);
 
+struct Store {
+  total_reserved: usize,
+  chunks: Vec<Chunk>,
+}
+
+// `Arena` contains a raw pointer, so we need to add declarations for `Send`
+// and `Sync`.
+//
+// SAFETY:
+//
+// ???
+
+unsafe impl<'a> Send for Arena<'a> { }
+
+unsafe impl<'a> Sync for Arena<'a> { }
+
 impl ChunkSizeClass {
   const MIN: Self = Self(MIN_CHUNK_SIZE_LOG2);
   const MAX: Self = Self(MAX_CHUNK_SIZE_LOG2);
 
   // `1 <= size <= isize::MAX`
 
-  #[inline]
   fn size(self) -> usize {
     1 << self.0
   }
 
-  #[inline]
-  fn with_size_at_least(n: usize) -> Option<Self> {
+  fn at_least(n: usize) -> Option<Self> {
     if n <= Self::MIN.size() {
       Some(Self::MIN)
     } else if n > Self::MAX.size() {
@@ -50,62 +59,33 @@ impl ChunkSizeClass {
   }
 }
 
-impl Arena {
-  pub fn new() -> Self {
+impl Store {
+  fn new() -> Self {
     Self {
       total_reserved: 0,
       chunks: Vec::new(),
     }
   }
 
-  pub fn reset(&mut self) {
-    if self.total_reserved > 0 {
-      self.reset_slow();
-    }
+  fn arena(&mut self) -> Arena<'_> {
+    Arena { offset: 0, base: ptr::null_mut(), store: self, }
   }
 
   #[inline(never)]
   #[cold]
-  fn reset_slow(&mut self) {
-    // SAFETY:
-    //
-    // - Because this method is called with `&mut self`, we know that every
-    //   lifetime of a reference to a previously allocated slot has ended. It
-    //   follows that it is safe to deallocate the chunks' memory.
-    // - The `layout` is the same as in `alloc_chunk`, so it is valid.
-    // - The `base` pointer was returned from `alloc::alloc` in `alloc_chunk`.
-
-    self.total_reserved = 0;
-
-    for Chunk { base, size } in self.chunks.drain(..) {
-      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
-
-      unsafe { alloc::dealloc(base, layout) }
-    }
-  }
-
-  pub fn allocator(&mut self) -> ArenaAllocator<'_> {
-    self.reset();
-
-    ArenaAllocator { offset: 0, base: ptr::null_mut(), arena: self, }
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn alloc_chunk(&mut self, at_least: usize) -> Chunk {
+  fn alloc_chunk(&mut self, min_size: usize) -> Chunk {
     let total_reserved = self.total_reserved;
 
-    // If we don't do any large single allocations, we'll get a sequence of
+    // If we don't allocate any large individual objects, we get a sequence of
     // chunk sizes that looks like
     //
     //   1, 1, 1, 1, 2, 2, 4, 4, 8, 8, ...
     //
     // as multiples of the minimum chunk size.
 
-    let at_least = cmp::max(at_least, total_reserved / 4 + 1);
-    let size_class = ChunkSizeClass::with_size_at_least(at_least).unwrap();
+    let min_size = cmp::max(min_size, total_reserved / 4 + 1);
+    let size_class = ChunkSizeClass::at_least(min_size).unwrap_or(ChunkSizeClass::MAX);
     let size = size_class.size();
-    let total_reserved = total_reserved.checked_add(size).unwrap();
 
     // SAFETY:
     //
@@ -119,24 +99,39 @@ impl Arena {
     //
     // - `size != 0`
 
-    let base = unsafe { alloc::alloc(layout) };
+    let base = unsafe { std::alloc::alloc(layout) };
 
-    self.total_reserved = total_reserved;
+    if base.is_null() { match std::alloc::handle_alloc_error(layout) { } }
+
+    self.total_reserved = total_reserved.saturating_add(size);
     self.chunks.push(Chunk { base, size });
 
     Chunk { base, size }
   }
 }
 
-impl Drop for Arena {
+impl Drop for Store {
   fn drop(&mut self) {
-    self.reset()
+    // SAFETY:
+    //
+    // - Every lifetime of a reference to a previously allocated slot has
+    //   ended. It follows that it is safe to deallocate the chunks' memory.
+    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
+    //   and alignment.
+    // - The `base` pointer was returned from `std::alloc::alloc` in
+    //   `alloc_chunk` and hasn't been deallocated yet.
+
+    for Chunk { base, size } in self.chunks.drain(..) {
+      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+
+      unsafe { std::alloc::dealloc(base, layout) }
+    }
   }
 }
 
-impl<'a> ArenaAllocator<'a> {
-  fn alloc_chunk(&mut self, at_least: usize) {
-    let Chunk { base, size } = self.arena.alloc_chunk(at_least);
+impl<'a> Arena<'a> {
+  fn alloc_chunk(&mut self, min_size: usize) {
+    let Chunk { base, size } = self.store.alloc_chunk(min_size);
 
     self.offset = size as isize; // NB: `size <= isize::MAX`
     self.base = base;
@@ -174,7 +169,7 @@ impl<'a> ArenaAllocator<'a> {
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'_, T> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
     let align = mem::align_of::<T>();
     let size_of_element = mem::size_of::<T>();
     let max_len = MAX_OBJECT_SIZE / size_of_element;
@@ -201,16 +196,22 @@ impl<'a> ArenaAllocator<'a> {
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_slice_too_long(&mut self, len: usize) -> ! {
+  fn alloc_slice_slow_slice_too_long(&mut self, len: usize) -> ! {
     let _ = len;
     panic!()
   }
 
   #[inline(never)]
   #[cold]
-  pub fn alloc_slice_slow_alloc_chunk<T>(&mut self, len: usize) -> ArenaSliceSlot<'_, T> {
+  fn alloc_slice_slow_alloc_chunk<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
     self.alloc_chunk(mem::size_of::<T>() * len);
     self.alloc_slice(len)
+  }
+
+  #[inline(always)]
+  pub fn with<F, A>(f: F) -> A where for<'b> F: FnOnce(Arena<'b>) -> A {
+    let mut store = Store::new();
+    f(store.arena())
   }
 }
 
@@ -228,13 +229,10 @@ impl<'a, T> ArenaSliceSlot<'a, T> {
       element.write(f(i));
     }
 
+    // We can use `mem::slice_assume_init_mut` after it's stabilized.
+
     let slot = self.0 as *mut [MaybeUninit<T>] as *mut [T];
 
     unsafe { &mut *slot }
-  }
-}
-pub fn bar<'a>(alloc: &mut ArenaAllocator<'a>, x: i64) {
-  for _ in 0 .. 100 {
-    let _ = alloc.alloc().init(x);
   }
 }
