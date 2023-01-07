@@ -9,7 +9,7 @@ const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
 pub struct Arena<'a> {
-  offset: isize,
+  offset: usize,
   base: *mut u8,
   store: &'a mut Store,
 }
@@ -18,14 +18,17 @@ pub struct ArenaSlot<'a, T>(&'a mut MaybeUninit<T>);
 
 pub struct ArenaSliceSlot<'a, T>(&'a mut [MaybeUninit<T>]);
 
-struct Chunk { base: *mut u8, size: usize, }
-
-struct ChunkSizeClass(u8);
-
 struct Store {
   total_reserved: usize,
   chunks: Vec<Chunk>,
 }
+
+struct Chunk {
+  base: *mut u8,
+  size: usize,
+}
+
+struct ChunkSizeClass(u8);
 
 // `Arena` contains a raw pointer, so we need to add declarations for `Send`
 // and `Sync`.
@@ -34,9 +37,8 @@ struct Store {
 //
 // ???
 
-unsafe impl<'a> Send for Arena<'a> { }
-
-unsafe impl<'a> Sync for Arena<'a> { }
+unsafe impl<'a> Send for Arena<'a> {}
+unsafe impl<'a> Sync for Arena<'a> {}
 
 impl ChunkSizeClass {
   const MIN: Self = Self(MIN_CHUNK_SIZE_LOG2);
@@ -83,8 +85,7 @@ impl Store {
     //
     // as multiples of the minimum chunk size.
 
-    let min_size = cmp::max(min_size, total_reserved / 4 + 1);
-    let size_class = ChunkSizeClass::at_least(min_size).unwrap_or(ChunkSizeClass::MAX);
+    let size_class = ChunkSizeClass::at_least(max(min_size, total_reserved / 4 + 1)).unwrap();
     let size = size_class.size();
 
     // SAFETY:
@@ -101,7 +102,7 @@ impl Store {
 
     let base = unsafe { std::alloc::alloc(layout) };
 
-    if base.is_null() { match std::alloc::handle_alloc_error(layout) { } }
+    if base.is_null() { match std::alloc::handle_alloc_error(layout) {} }
 
     self.total_reserved = total_reserved.saturating_add(size);
     self.chunks.push(Chunk { base, size });
@@ -133,7 +134,7 @@ impl<'a> Arena<'a> {
   fn alloc_chunk(&mut self, min_size: usize) {
     let Chunk { base, size } = self.store.alloc_chunk(min_size);
 
-    self.offset = size as isize; // NB: `size <= isize::MAX`
+    self.offset = size;
     self.base = base;
   }
 
@@ -148,14 +149,13 @@ impl<'a> Arena<'a> {
     let offset = self.offset;
     let base = self.base;
 
-    let offset = offset - (size as isize);
-    let offset = offset & ((! (align - 1)) as isize);
+    if size > offset { return self.alloc_slow(); }
 
-    if offset < 0 { return self.alloc_slow(); }
+    let offset = (offset - size) & ! (align - 1);
 
     self.offset = offset;
 
-    let slot = base.wrapping_offset(offset).cast::<MaybeUninit<T>>();
+    let slot = base.wrapping_add(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { &mut *slot };
 
     ArenaSlot(slot)
@@ -176,19 +176,19 @@ impl<'a> Arena<'a> {
 
     assert!(align <= MAX_OBJECT_ALIGN);
 
-    if len > max_len { match self.alloc_slice_slow_slice_too_long(len) { } }
+    if len > max_len { match self.alloc_slice_slow_slice_too_long(len) {} }
 
     let offset = self.offset;
     let base = self.base;
+    let size = size_of_element * len;
 
-    let offset = offset - ((size_of_element * len) as isize);
-    let offset = offset & ((! (align - 1)) as isize);
+    if size > offset { return self.alloc_slice_slow_alloc_chunk(len); }
 
-    if offset < 0 { return self.alloc_slice_slow_alloc_chunk(len); }
+    let offset = (offset - size) & ! (align - 1);
 
     self.offset = offset;
 
-    let slot = base.wrapping_offset(offset).cast::<MaybeUninit<T>>();
+    let slot = base.wrapping_add(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { slice::from_raw_parts_mut(slot, len) };
 
     ArenaSliceSlot(slot)
@@ -225,8 +225,8 @@ impl<'a, T> ArenaSlot<'a, T> {
 impl<'a, T> ArenaSliceSlot<'a, T> {
   #[inline(always)]
   pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
-    for (i, element) in self.0.iter_mut().enumerate() {
-      element.write(f(i));
+    for (i, a) in self.0.iter_mut().enumerate() {
+      a.write(f(i));
     }
 
     // We can use `mem::slice_assume_init_mut` after it's stabilized.

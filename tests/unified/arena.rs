@@ -17,7 +17,7 @@ fn test_arena() {
 
 #[test]
 fn test_send_sync() {
-  fn drop_send_sync<T: Send + Sync>(_ : T) { }
+  fn drop_send_sync<T: Send + Sync>(_ : T) {}
   Arena::with(|mut arena| {
     let x = arena.alloc::<i64>();
     let y = arena.alloc_slice::<i64>(2);
