@@ -149,7 +149,7 @@ impl<'a> Arena<'a> {
     let offset = self.offset;
     let base = self.base;
 
-    if size > offset { return self.alloc_slow(); }
+    if size > offset { return self.alloc_cold(); }
 
     let offset = (offset - size) & ! (align - 1);
 
@@ -163,7 +163,7 @@ impl<'a> Arena<'a> {
 
   #[inline(never)]
   #[cold]
-  fn alloc_slow<T>(&mut self) -> ArenaSlot<'a, T> {
+  fn alloc_cold<T>(&mut self) -> ArenaSlot<'a, T> {
     self.alloc_chunk(mem::size_of::<T>());
     self.alloc()
   }
@@ -176,13 +176,13 @@ impl<'a> Arena<'a> {
 
     assert!(align <= MAX_OBJECT_ALIGN);
 
-    if len > max_len { match self.alloc_slice_slow_slice_too_long(len) {} }
+    if len > max_len { match self.alloc_slice_cold_slice_too_long(len) {} }
 
     let offset = self.offset;
     let base = self.base;
     let size = size_of_element * len;
 
-    if size > offset { return self.alloc_slice_slow_alloc_chunk(len); }
+    if size > offset { return self.alloc_slice_cold_alloc_chunk(len); }
 
     let offset = (offset - size) & ! (align - 1);
 
@@ -196,14 +196,14 @@ impl<'a> Arena<'a> {
 
   #[inline(never)]
   #[cold]
-  fn alloc_slice_slow_slice_too_long(&mut self, len: usize) -> ! {
+  fn alloc_slice_cold_slice_too_long(&mut self, len: usize) -> ! {
     let _ = len;
     panic!()
   }
 
   #[inline(never)]
   #[cold]
-  fn alloc_slice_slow_alloc_chunk<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
+  fn alloc_slice_cold_alloc_chunk<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
     self.alloc_chunk(mem::size_of::<T>() * len);
     self.alloc_slice(len)
   }

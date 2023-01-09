@@ -1,3 +1,4 @@
+/*
 use crate::prelude::*;
 
 #[repr(u8)]
@@ -81,3 +82,4 @@ impl<'a> Lexer<'a> {
     unimplemented!()
   }
 }
+*/
