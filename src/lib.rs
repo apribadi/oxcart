@@ -13,7 +13,7 @@ const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
-struct ArenaStorage {
+pub struct ArenaStorage {
   total_reserved: usize,
   chunks: Vec<Chunk>,
 }
@@ -65,14 +65,14 @@ impl ChunkSizeClass {
 }
 
 impl ArenaStorage {
-  fn new() -> Self {
+  pub fn new() -> Self {
     Self {
       total_reserved: 0,
       chunks: Vec::new(),
     }
   }
 
-  fn arena(&mut self) -> Arena<'_> {
+  pub fn arena(&mut self) -> Arena<'_> {
     Arena { offset: 0, base: ptr::null_mut(), storage: self, }
   }
 
@@ -134,13 +134,6 @@ impl Drop for ArenaStorage {
 }
 
 impl<'a> Arena<'a> {
-  fn alloc_chunk(&mut self, min_size: usize) {
-    let Chunk { base, size } = self.storage.alloc_chunk(min_size);
-
-    self.offset = size;
-    self.base = base;
-  }
-
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
     let align = mem::align_of::<T>();
@@ -149,26 +142,29 @@ impl<'a> Arena<'a> {
     assert!(align <= MAX_OBJECT_ALIGN);
     assert!(size <= MAX_OBJECT_SIZE);
 
-    let offset = self.offset;
-    let base = self.base;
+    let mut offset = self.offset;
+    let mut base = self.base;
 
-    if size > offset { return self.alloc_cold(); }
+    if size > offset {
+      Chunk { base, size: offset } = self.storage.alloc_chunk(size);
+      self.base = base;
+    }
 
     let offset = (offset - size) & ! (align - 1);
-
-    self.offset = offset;
 
     let slot = base.wrapping_add(offset).cast::<MaybeUninit<T>>();
     let slot = unsafe { &mut *slot };
 
+    self.offset = offset;
+
     ArenaSlot(slot)
   }
 
-  #[inline(never)]
-  #[cold]
-  fn alloc_cold<T>(&mut self) -> ArenaSlot<'a, T> {
-    self.alloc_chunk(mem::size_of::<T>());
-    self.alloc()
+  fn alloc_chunk(&mut self, min_size: usize) {
+    let Chunk { base, size } = self.storage.alloc_chunk(min_size);
+
+    self.offset = size;
+    self.base = base;
   }
 
   #[inline(always)]
