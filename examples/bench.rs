@@ -18,7 +18,7 @@ struct Node<'a, A> {
 
 fn warmup() {
   let mut s = 1u64;
-  for i in 0 .. 100_000_000 { s = s.wrapping_mul(i); }
+  for i in 0 .. 1_000_000_000 { s = s.wrapping_mul(i); }
   let _: u64 = hint::black_box(s);
 }
 
@@ -30,13 +30,12 @@ fn timeit<A, F>(f: F) -> f64 where F: FnOnce() -> A {
 }
 
 fn run_bench<F, A, B>(name: &str, t: A, f: F) where F: Fn(A, usize) -> B {
-  let elapsed = timeit(|| f(t, COUNT));
+  let elapsed = timeit(|| f(t, hint::black_box(COUNT)));
   print!("{:25} {:.3} ns\n", name, elapsed / (COUNT as f64));
 }
 
 #[inline(never)]
-fn bench_oxcart<'a>(arena: Arena<'a>, count: usize) -> List<'a, u64> {
-  let mut arena = arena;
+fn bench_oxcart<'a>(arena: &mut Arena<'a>, count: usize) -> List<'a, u64> {
   let mut r = List::Nil;
   for i in 0 .. count {
     r = List::Cons(arena.alloc().init(Node { car: i as u64, cdr: r }));
@@ -57,8 +56,9 @@ fn main() {
   warmup();
 
   let mut storage = ArenaStorage::new();
+  let mut arena = storage.arena();
   let bump = &bumpalo::Bump::new();
 
-  run_bench("oxcart", storage.arena(), bench_oxcart);
+  run_bench("oxcart", &mut arena, bench_oxcart);
   run_bench("bumpalo", bump, bench_bumpalo);
 }
