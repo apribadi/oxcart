@@ -11,19 +11,17 @@ use core::ptr;
 const CHUNK_ALIGN_LOG2: u8 = 6;
 const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
 const MIN_CHUNK_SIZE_LOG2: u8 = 16;
+const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
 const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
 const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
 pub struct ArenaStorage {
-  total_reserved: usize,
+  average: usize,
+  capacity: usize,
   chunks: Vec<Chunk>,
 }
-
-unsafe impl Send for ArenaStorage {}
-
-unsafe impl Sync for ArenaStorage {}
 
 pub struct Arena<'a> {
   lo: *mut u8,
@@ -31,13 +29,41 @@ pub struct Arena<'a> {
   storage: &'a mut ArenaStorage,
 }
 
+// SAFETY:
+//
+// The `ArenaStorage` and `Arena` types conform to the usual shared xor mutable
+// discipline.
+
+unsafe impl Send for ArenaStorage {}
+
+unsafe impl Sync for ArenaStorage {}
+
 unsafe impl<'a> Send for Arena<'a> {}
 
 unsafe impl<'a> Sync for Arena<'a> {}
 
-pub struct ArenaSlot<'a, T>(&'a mut MaybeUninit<T>);
+pub struct ArenaSlot<'a, T: 'a>(&'a mut MaybeUninit<T>);
 
-pub struct ArenaSliceSlot<'a, T>(&'a mut [MaybeUninit<T>]);
+pub struct ArenaSliceSlot<'a, T: 'a>(&'a mut [MaybeUninit<T>]);
+
+#[derive(Clone, Debug)]
+pub enum ArenaError {
+  GlobalAllocError,
+  ObjectAlignTooLarge,
+  ObjectSizeTooLarge,
+  ObjectTypeNeedsDrop,
+  SliceTooLong,
+}
+
+enum Panicked {}
+
+trait InternalError {
+  fn from_global_alloc_error(layout: Layout) -> Self;
+  fn from_object_align_too_large(align: usize) -> Self;
+  fn from_object_size_too_large(size: usize) -> Self;
+  fn from_object_type_needs_drop() -> Self;
+  fn from_slice_too_long(len: usize) -> Self;
+}
 
 struct Chunk {
   lo: *mut u8,
@@ -45,6 +71,75 @@ struct Chunk {
 }
 
 struct ChunkSizeClass(u8);
+
+#[inline(always)]
+#[cold]
+fn cold() {}
+
+#[inline(always)]
+fn unlikely(p: bool) -> bool {
+  if p { cold() }
+  p
+}
+
+#[inline(always)]
+fn ok<T>(x: Result<T, Panicked>) -> T {
+  match x { Ok(t) => t, Err(e) => match e {} }
+}
+
+impl InternalError for ArenaError {
+  #[inline(always)]
+  fn from_global_alloc_error(_: Layout) -> Self {
+    Self::GlobalAllocError
+  }
+
+  #[inline(always)]
+  fn from_object_align_too_large(_: usize) -> Self {
+    Self::ObjectAlignTooLarge
+  }
+
+  #[inline(always)]
+  fn from_object_size_too_large(_: usize) -> Self {
+    Self::ObjectSizeTooLarge
+  }
+
+  #[inline(always)]
+  fn from_object_type_needs_drop() -> Self {
+    Self::ObjectTypeNeedsDrop
+  }
+
+  #[inline(always)]
+  fn from_slice_too_long(_: usize) -> Self {
+    Self::SliceTooLong
+  }
+}
+
+impl InternalError for Panicked {
+  #[inline(never)]
+  fn from_global_alloc_error(layout: Layout) -> Self {
+    std::alloc::handle_alloc_error(layout)
+  }
+
+  #[inline(never)]
+  fn from_object_align_too_large(align: usize) -> Self {
+    panic!("object align too large: {:?}", align)
+  }
+
+  #[inline(never)]
+  fn from_object_size_too_large(size: usize) -> Self {
+    panic!("object size too large: {:?}", size)
+  }
+
+  #[inline(never)]
+  fn from_object_type_needs_drop() -> Self {
+    panic!("object type needs drop")
+  }
+
+  #[inline(never)]
+  fn from_slice_too_long(len: usize) -> Self {
+    panic!("slice too long: {:?}", len)
+  }
+}
 
 impl ChunkSizeClass {
   const MIN: Self = Self(MIN_CHUNK_SIZE_LOG2);
@@ -56,26 +151,31 @@ impl ChunkSizeClass {
     1 << self.0
   }
 
-  fn at_least(n: usize) -> Option<Self> {
+  fn from_target(n: usize) -> Self {
     if n <= Self::MIN.size() {
-      Some(Self::MIN)
+      Self::MIN
     } else if n > Self::MAX.size() {
-      None
+      Self::MAX
     } else {
-      Some(Self((usize::BITS - (n - 1).leading_zeros()) as u8))
+      Self((usize::BITS - (n - 1).leading_zeros()) as u8)
     }
   }
 }
 
 impl ArenaStorage {
+  #[inline]
   pub fn new() -> Self {
     Self {
-      total_reserved: 0,
+      average: MIN_CHUNK_SIZE,
+      capacity: 0,
       chunks: Vec::new(),
     }
   }
 
+  #[inline]
   pub fn arena(&mut self) -> Arena<'_> {
+    self.reset();
+
     Arena {
       lo: ptr::invalid_mut(0),
       hi: ptr::invalid_mut(0),
@@ -83,10 +183,50 @@ impl ArenaStorage {
     }
   }
 
+  #[inline]
+  pub fn reset(&mut self) {
+    if self.capacity > 0 {
+      self.internal_reset()
+    }
+  }
+
   #[inline(never)]
-  #[cold]
-  fn alloc_chunk(&mut self, min_size: usize) -> Chunk {
-    let total_reserved = self.total_reserved;
+  fn internal_reset(&mut self) {
+    let average = self.average;
+    let capacity = self.capacity;
+
+    self.average = average / 2 + capacity / 2;
+    self.capacity = 0;
+
+    let chunks = mem::replace(&mut self.chunks, Vec::new());
+
+    // SAFETY:
+    //
+    // - Because this method takes a mutable reference, every lifetime of a
+    //   reference to a previously allocated slot has ended. It follows that it
+    //   is safe to deallocate the chunks' memory.
+    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
+    //   and alignment.
+    // - The `lo` pointer was returned from `std::alloc::alloc` in
+    //   `alloc_chunk` and hasn't been deallocated yet.
+
+    for Chunk { lo, hi } in chunks.into_iter() {
+      let size = hi.addr() - lo.addr();
+      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+
+      unsafe { std::alloc::dealloc(lo, layout) }
+    }
+  }
+
+  #[inline(never)]
+  fn alloc_chunk<E: InternalError>(&mut self, min_size: usize) -> Result<Chunk, E> {
+    // POSTCONDITION:
+    //
+    // - If `min_size <= MAX_OBJECT_SIZE`, then the returned `Chunk` has size
+    //   `>= min_size`.
+
+    let average = self.average;
+    let capacity = self.capacity;
 
     // If we don't allocate any large individual objects, we get a sequence of
     // chunk sizes that looks like
@@ -95,7 +235,12 @@ impl ArenaStorage {
     //
     // as multiples of the minimum chunk size.
 
-    let size_class = ChunkSizeClass::at_least(max(min_size, total_reserved / 4 + 1)).unwrap();
+    let target_0 = min_size;
+    let target_1 = average / 4;
+    let target_2 = capacity / 4 + 1;
+    let target = max(max(target_0, target_1), target_2);
+
+    let size_class = ChunkSizeClass::from_target(target);
     let size = size_class.size();
 
     // SAFETY:
@@ -112,95 +257,129 @@ impl ArenaStorage {
 
     let lo = unsafe { std::alloc::alloc(layout) };
 
-    if lo.is_null() { match std::alloc::handle_alloc_error(layout) {} }
+    if lo.is_null() { return Err(E::from_global_alloc_error(layout)); }
 
     let hi = lo.wrapping_add(size);
 
-    self.total_reserved = total_reserved.saturating_add(size);
+    // We're past possible error conditions, so actually update self.
+
+    // TODO: `push` might fail.
+
+    self.capacity = capacity.saturating_add(size);
     self.chunks.push(Chunk { lo, hi });
 
-    Chunk { lo, hi }
+    Ok(Chunk { lo, hi })
   }
 }
 
 impl Drop for ArenaStorage {
+  #[inline]
   fn drop(&mut self) {
-    // SAFETY:
-    //
-    // - Every lifetime of a reference to a previously allocated slot has
-    //   ended. It follows that it is safe to deallocate the chunks' memory.
-    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
-    //   and alignment.
-    // - The `lo` pointer was returned from `std::alloc::alloc` in
-    //   `alloc_chunk` and hasn't been deallocated yet.
-
-    for Chunk { lo, hi } in self.chunks.drain(..) {
-      let size = hi.addr() - lo.addr();
-      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
-
-      unsafe { std::alloc::dealloc(lo, layout) }
-    }
+    self.reset()
   }
 }
 
 impl<'a> Arena<'a> {
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
+  fn internal_alloc<T, E: InternalError>(&mut self) -> Result<ArenaSlot<'a, T>, E> {
     let align = mem::align_of::<T>();
     let size = mem::size_of::<T>();
 
-    assert!(align <= MAX_OBJECT_ALIGN);
-    assert!(size <= MAX_OBJECT_SIZE);
+    if /* const */ mem::needs_drop::<T>() {
+      return Err(E::from_object_type_needs_drop());
+    }
 
-    if size > self.hi.addr() - self.lo.addr() {
-      let Chunk { lo, hi } = self.storage.alloc_chunk(size);
+    if /* const */ align > MAX_OBJECT_ALIGN {
+      return Err(E::from_object_align_too_large(align));
+    }
+
+    if /* const */ size > MAX_OBJECT_SIZE {
+      return Err(E::from_object_size_too_large(size));
+    }
+
+    if unlikely(size > self.hi.addr() - self.lo.addr()) {
+      let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
     let hi = self.hi.wrapping_sub(size).mask(! (align - 1));
-    let slot = unsafe { &mut *hi.cast() };
+
+    // SAFETY:
+    //
+    // - The memory has the correct size and alignment.
+    // - The memory is not aliased by any other reference.
+    // - The memory is live for the duration of the assigned lifetime.
+
+    let slot: &'a mut MaybeUninit<T> = unsafe { &mut *hi.cast() };
 
     self.hi = hi;
 
-    ArenaSlot(slot)
+    Ok(ArenaSlot(slot))
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
+  fn internal_alloc_slice<T, E: InternalError>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, E> {
     let align = mem::align_of::<T>();
     let size_of_element = mem::size_of::<T>();
     let max_len = MAX_OBJECT_SIZE / size_of_element;
 
-    assert!(align <= MAX_OBJECT_ALIGN);
+    if /* const */ mem::needs_drop::<T>() {
+      return Err(E::from_object_type_needs_drop());
+    }
 
-    if len > max_len { match self.alloc_slice_cold_slice_too_long(len) {} }
+    if /* const */ align > MAX_OBJECT_ALIGN {
+      return Err(E::from_object_align_too_large(align));
+    }
+
+    if unlikely(len > max_len) {
+      return Err(E::from_slice_too_long(len));
+    }
 
     let size = size_of_element * len;
 
-    if size > self.hi.addr() - self.lo.addr() {
-      let Chunk { lo, hi } = self.storage.alloc_chunk(size);
+    if unlikely(size > self.hi.addr() - self.lo.addr()) {
+      let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
     let hi = self.hi.wrapping_sub(size).mask(! (align - 1));
-    let slot = hi.cast::<MaybeUninit<T>>();
-    let slot = unsafe { slice::from_raw_parts_mut(slot, len) };
+
+    // SAFETY:
+    //
+    // - The memory has the correct size and alignment.
+    // - The memory is not aliased by any other reference.
+    // - The memory is live for the duration of the assigned lifetime.
+
+    let slot: &'a mut [MaybeUninit<T>] = unsafe { slice::from_raw_parts_mut(hi.cast(), len) };
 
     self.hi = hi;
 
-    ArenaSliceSlot(slot)
+    Ok(ArenaSliceSlot(slot))
   }
 
-  #[inline(never)]
-  #[cold]
-  fn alloc_slice_cold_slice_too_long(&mut self, len: usize) -> ! {
-    let _ = len;
-    panic!()
+  #[inline]
+  pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
+    ok(self.internal_alloc())
   }
 
-  #[inline(always)]
+  #[inline]
+  pub fn try_alloc<T>(&mut self) -> Result<ArenaSlot<'a, T>, ArenaError> {
+    self.internal_alloc()
+  }
+
+  #[inline]
+  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
+    ok(self.internal_alloc_slice(len))
+  }
+
+  #[inline]
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, ArenaError> {
+    self.internal_alloc_slice(len)
+  }
+
+  #[inline]
   pub fn with<F, A>(f: F) -> A where for<'b> F: FnOnce(Arena<'b>) -> A {
     let mut storage = ArenaStorage::new();
     f(storage.arena())
@@ -208,23 +387,23 @@ impl<'a> Arena<'a> {
 }
 
 impl<'a, T> ArenaSlot<'a, T> {
-  #[inline(always)]
+  #[inline]
   pub fn init(self, value: T) -> &'a mut T {
     self.0.write(value)
   }
 }
 
 impl<'a, T> ArenaSliceSlot<'a, T> {
-  #[inline(always)]
+  #[inline]
   pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
     for (i, a) in self.0.iter_mut().enumerate() {
       a.write(f(i));
     }
 
-    // We can use `mem::slice_assume_init_mut` after it's stabilized.
+    // SAFETY:
+    //
+    // - Every slice element has been initialized.
 
-    let slot = self.0 as *mut [MaybeUninit<T>] as *mut [T];
-
-    unsafe { &mut *slot }
+    unsafe { &mut *(self.0 as *mut [MaybeUninit<T>] as *mut [T]) }
   }
 }
