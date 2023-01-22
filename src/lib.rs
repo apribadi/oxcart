@@ -73,16 +73,6 @@ struct Chunk {
 struct ChunkSizeClass(u8);
 
 #[inline(always)]
-#[cold]
-fn cold() {}
-
-#[inline(always)]
-fn unlikely(p: bool) -> bool {
-  if p { cold() }
-  p
-}
-
-#[inline(always)]
 fn ok<T>(x: Result<T, Panicked>) -> T {
   match x { Ok(t) => t, Err(e) => match e {} }
 }
@@ -116,26 +106,31 @@ impl InternalError for ArenaError {
 
 impl InternalError for Panicked {
   #[inline(never)]
+  #[cold]
   fn from_global_alloc_error(layout: Layout) -> Self {
     std::alloc::handle_alloc_error(layout)
   }
 
   #[inline(never)]
+  #[cold]
   fn from_object_align_too_large(align: usize) -> Self {
     panic!("object align too large: {:?}", align)
   }
 
   #[inline(never)]
+  #[cold]
   fn from_object_size_too_large(size: usize) -> Self {
     panic!("object size too large: {:?}", size)
   }
 
   #[inline(never)]
+  #[cold]
   fn from_object_type_needs_drop() -> Self {
     panic!("object type needs drop")
   }
 
   #[inline(never)]
+  #[cold]
   fn from_slice_too_long(len: usize) -> Self {
     panic!("slice too long: {:?}", len)
   }
@@ -163,7 +158,7 @@ impl ChunkSizeClass {
 }
 
 impl ArenaStorage {
-  #[inline]
+  #[inline(always)]
   pub fn new() -> Self {
     Self {
       average: MIN_CHUNK_SIZE,
@@ -172,7 +167,7 @@ impl ArenaStorage {
     }
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn arena(&mut self) -> Arena<'_> {
     self.reset();
 
@@ -183,7 +178,7 @@ impl ArenaStorage {
     }
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn reset(&mut self) {
     if self.capacity > 0 {
       self.internal_reset()
@@ -191,6 +186,7 @@ impl ArenaStorage {
   }
 
   #[inline(never)]
+  #[cold]
   fn internal_reset(&mut self) {
     let average = self.average;
     let capacity = self.capacity;
@@ -219,6 +215,7 @@ impl ArenaStorage {
   }
 
   #[inline(never)]
+  #[cold]
   fn alloc_chunk<E: InternalError>(&mut self, min_size: usize) -> Result<Chunk, E> {
     // POSTCONDITION:
     //
@@ -273,7 +270,7 @@ impl ArenaStorage {
 }
 
 impl Drop for ArenaStorage {
-  #[inline]
+  #[inline(always)]
   fn drop(&mut self) {
     self.reset()
   }
@@ -297,7 +294,7 @@ impl<'a> Arena<'a> {
       return Err(E::from_object_size_too_large(size));
     }
 
-    if unlikely(size > self.hi.addr() - self.lo.addr()) {
+    if size > self.hi.addr() - self.lo.addr() {
       let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
@@ -332,13 +329,13 @@ impl<'a> Arena<'a> {
       return Err(E::from_object_align_too_large(align));
     }
 
-    if unlikely(len > max_len) {
+    if len > max_len {
       return Err(E::from_slice_too_long(len));
     }
 
     let size = size_of_element * len;
 
-    if unlikely(size > self.hi.addr() - self.lo.addr()) {
+    if size > self.hi.addr() - self.lo.addr() {
       let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
@@ -359,27 +356,27 @@ impl<'a> Arena<'a> {
     Ok(ArenaSliceSlot(slot))
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
     ok(self.internal_alloc())
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<ArenaSlot<'a, T>, ArenaError> {
     self.internal_alloc()
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
     ok(self.internal_alloc_slice(len))
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, ArenaError> {
     self.internal_alloc_slice(len)
   }
 
-  #[inline]
+  #[inline(always)]
   pub fn with<F, A>(f: F) -> A where for<'b> F: FnOnce(Arena<'b>) -> A {
     let mut storage = ArenaStorage::new();
     f(storage.arena())
@@ -387,14 +384,14 @@ impl<'a> Arena<'a> {
 }
 
 impl<'a, T> ArenaSlot<'a, T> {
-  #[inline]
+  #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
     self.0.write(value)
   }
 }
 
 impl<'a, T> ArenaSliceSlot<'a, T> {
-  #[inline]
+  #[inline(always)]
   pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
     for (i, a) in self.0.iter_mut().enumerate() {
       a.write(f(i));
