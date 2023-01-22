@@ -1,4 +1,3 @@
-#![feature(strict_provenance)]
 #![feature(ptr_mask)]
 
 use core::alloc::Layout;
@@ -75,6 +74,17 @@ struct ChunkSizeClass(u8);
 #[inline(always)]
 fn ok<T>(x: Result<T, Panicked>) -> T {
   match x { Ok(t) => t, Err(e) => match e {} }
+}
+
+#[inline(always)]
+fn ptr_addr<T>(x: *mut T) -> usize {
+  x as usize
+}
+
+#[inline(always)]
+fn ptr_mask<T>(x: *mut T, m: usize) -> *mut T {
+  // ((x as usize) & m) as *mut T
+  x.mask(m)
 }
 
 impl InternalError for ArenaError {
@@ -172,8 +182,8 @@ impl ArenaStorage {
     self.reset();
 
     Arena {
-      lo: ptr::invalid_mut(0),
-      hi: ptr::invalid_mut(0),
+      lo: ptr::null_mut(),
+      hi: ptr::null_mut(),
       storage: self,
     }
   }
@@ -188,13 +198,13 @@ impl ArenaStorage {
   #[inline(never)]
   #[cold]
   fn internal_reset(&mut self) {
+    let chunks = mem::replace(&mut self.chunks, Vec::new());
+
     let average = self.average;
     let capacity = self.capacity;
 
     self.average = average / 2 + capacity / 2;
     self.capacity = 0;
-
-    let chunks = mem::replace(&mut self.chunks, Vec::new());
 
     // SAFETY:
     //
@@ -207,7 +217,7 @@ impl ArenaStorage {
     //   `alloc_chunk` and hasn't been deallocated yet.
 
     for Chunk { lo, hi } in chunks.into_iter() {
-      let size = hi.addr() - lo.addr();
+      let size = ptr_addr(hi) - ptr_addr(lo);
       let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
 
       unsafe { std::alloc::dealloc(lo, layout) }
@@ -294,13 +304,13 @@ impl<'a> Arena<'a> {
       return Err(E::from_object_size_too_large(size));
     }
 
-    if size > self.hi.addr() - self.lo.addr() {
+    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
       let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
-    let hi = self.hi.wrapping_sub(size).mask(! (align - 1));
+    let hi = ptr_mask(self.hi.wrapping_sub(size), ! (align - 1));
 
     // SAFETY:
     //
@@ -335,13 +345,13 @@ impl<'a> Arena<'a> {
 
     let size = size_of_element * len;
 
-    if size > self.hi.addr() - self.lo.addr() {
+    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
       let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
-    let hi = self.hi.wrapping_sub(size).mask(! (align - 1));
+    let hi = ptr_mask(self.hi.wrapping_sub(size), ! (align - 1));
 
     // SAFETY:
     //
