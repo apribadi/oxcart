@@ -3,11 +3,11 @@ use std::hint;
 use oxcart::Arena;
 use oxcart::ArenaStorage;
 
-const COUNT: usize = 100_000_000;
+const COUNT: usize = 10_000_000;
 
 enum List<'a, A> {
   Nil,
-  Cons(&'a Node<'a, A>),
+  Cons(&'a mut Node<'a, A>),
 }
 
 #[allow(dead_code)]
