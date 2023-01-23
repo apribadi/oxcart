@@ -83,8 +83,7 @@ fn ptr_addr<T>(x: *mut T) -> usize {
 
 #[inline(always)]
 fn ptr_mask<T>(x: *mut T, m: usize) -> *mut T {
-  // ((x as usize) & m) as *mut T
-  x.mask(m)
+  x.mask(m) // ((x as usize) & m) as *mut T
 }
 
 impl InternalError for ArenaError {
