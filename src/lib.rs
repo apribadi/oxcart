@@ -1,3 +1,10 @@
+#![deny(unsafe_op_in_unsafe_fn)]
+#![warn(elided_lifetimes_in_paths)]
+#![warn(trivial_casts)]
+#![warn(trivial_numeric_casts)]
+#![warn(unused_lifetimes)]
+#![warn(unused_qualifications)]
+
 use core::alloc::Layout;
 use core::cmp::max;
 use core::mem::MaybeUninit;
@@ -5,17 +12,20 @@ use core::mem;
 use core::slice;
 use core::ptr;
 
-const CHUNK_ALIGN_LOG2: u8 = 6;
 const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
-const MIN_CHUNK_SIZE_LOG2: u8 = 16;
-const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
+const CHUNK_ALIGN_LOG2: u8 = 6;
 const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
+const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
 const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
+const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
+const MIN_CHUNK_SIZE_LOG2: u8 = 14;
+const NULL: *mut u8 = ptr::null_mut();
 
 pub struct Arena {
+  lo: *mut u8,
+  hi: *mut u8,
   total_allocated: usize,
-  chunks: Vec<Chunk>,
 }
 
 pub struct ArenaAllocator<'a> {
@@ -60,7 +70,7 @@ trait InternalError {
   fn from_slice_too_long(len: usize) -> Self;
 }
 
-struct Chunk {
+struct Range {
   lo: *mut u8,
   hi: *mut u8,
 }
@@ -80,7 +90,29 @@ fn ptr_byte_diff<T>(p: *const T, q: *const T) -> usize {
 #[inline(always)]
 fn ptr_mask_mut<T>(p: *mut T, m: usize) -> *mut T {
   // #![feature(ptr_mask)] => `p.mask(m)`
-  (p as *mut u8).wrapping_sub((p as usize) & ! m) as *mut T
+  p.cast::<u8>().wrapping_sub((p as usize) & ! m).cast::<T>()
+}
+
+#[inline(always)]
+unsafe fn dealloc_chunk_list(lo: *mut u8, hi: *mut u8) {
+  // SAFETY:
+  //
+  // - ???
+
+  let mut lo = lo;
+  let mut hi = hi;
+
+  while ! hi.is_null() {
+    let size = ptr_byte_diff(hi, lo) + mem::size_of::<Range>();
+    let next = unsafe { hi.cast::<Range>().read() };
+
+    let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+
+    unsafe { std::alloc::dealloc(lo, layout) }
+
+    lo = next.lo;
+    hi = next.hi;
+  }
 }
 
 impl InternalError for ArenaError {
@@ -167,80 +199,41 @@ impl Arena {
   #[inline(always)]
   pub fn new() -> Self {
     Self {
+      lo: NULL,
+      hi: NULL,
       total_allocated: 0,
-      chunks: Vec::new(),
     }
   }
 
   #[inline(always)]
   pub fn allocator(&mut self) -> ArenaAllocator<'_> {
-    match self.chunks.last() {
-      None =>
-        ArenaAllocator {
-          lo: ptr::null_mut(),
-          hi: ptr::null_mut(),
-          arena: self,
-        },
-      Some(&Chunk { lo, hi }) =>
-        ArenaAllocator {
-          lo,
-          hi,
-          arena: self,
-        },
-    }
+    ArenaAllocator { lo: self.lo, hi: self.hi, arena: self, }
   }
 
   #[inline(always)]
   pub fn reset(&mut self) {
-    if ! self.chunks.is_empty() {
-      self.internal_reset()
+    // Retain the top of the stack, dealloc everything else.
+
+    let hi = self.hi;
+
+    if ! hi.is_null() {
+      let next = unsafe { hi.cast::<Range>().replace(Range { lo: NULL, hi: NULL }) };
+
+      unsafe { dealloc_chunk_list(next.lo, next.hi) };
     }
   }
 
   #[inline(never)]
   #[cold]
-  fn internal_reset(&mut self) {
-    let chunks = mem::replace(&mut self.chunks, Vec::new());
-
-    // SAFETY:
-    //
-    // - Because this method takes a mutable reference, every lifetime of a
-    //   reference to a previously allocated slot has ended. It follows that it
-    //   is safe to deallocate the chunks' memory.
-    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
-    //   and alignment.
-    // - The `lo` pointer was returned from `std::alloc::alloc` in
-    //   `alloc_chunk` and hasn't been deallocated yet.
-
-    for Chunk { lo, hi } in chunks.into_iter() {
-      let size = ptr_byte_diff(hi, lo);
-      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
-
-      unsafe { std::alloc::dealloc(lo, layout) }
-    }
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Chunk, E>
+  fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Range, E>
     where E: InternalError
   {
-    // POSTCONDITION:
-    //
-    // - If `min_size <= MAX_OBJECT_SIZE`, then the returned `Chunk` has size
-    //   `>= min_size`.
+    assert!(MIN_CHUNK_SIZE % CHUNK_ALIGN == 0);
+    assert!(mem::align_of::<Range>() <= CHUNK_ALIGN);
+    assert!(mem::size_of::<Range>() <= MIN_CHUNK_SIZE);
 
     let total_allocated = self.total_allocated;
-
-    // If we don't allocate any large individual objects, we get a sequence of
-    // chunk sizes that looks like
-    //
-    //   1, 1, 1, 1, 2, 2, 4, 4, 8, 8, ...
-    //
-    // as multiples of the minimum chunk size.
-
     let target = max(min_size, total_allocated / 4 + 1);
-
     let size_class = ChunkSizeClass::from_target(target);
     let size = size_class.size();
 
@@ -260,39 +253,32 @@ impl Arena {
 
     if lo.is_null() { return Err(E::from_global_alloc_error(layout)); }
 
-    let hi = lo.wrapping_add(size);
+    let hi = lo.wrapping_add(size).wrapping_sub(mem::size_of::<Range>());
 
-    // We're past possible error conditions, so actually update self.
+    // SAFETY:
+    //
+    // - ???
 
-    // TODO: `push` might fail.
+    unsafe { hi.cast::<Range>().write(Range { lo: self.lo, hi: self.hi }) };
 
+    // We're past possible error conditions, so actually update `self`.
+
+    self.lo = lo;
+    self.hi = hi;
     self.total_allocated = total_allocated.saturating_add(size);
-    self.chunks.push(Chunk { lo, hi });
 
-    Ok(Chunk { lo, hi })
+    Ok(Range { lo, hi })
   }
 }
 
 impl Drop for Arena {
   #[inline(always)]
   fn drop(&mut self) {
-    let chunks = mem::replace(&mut self.chunks, Vec::new());
-
     // SAFETY:
     //
-    // - Every lifetime of a reference to a previously allocated slot has
-    //   ended. It follows that it is safe to deallocate the chunks' memory.
-    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
-    //   and alignment.
-    // - The `lo` pointer was returned from `std::alloc::alloc` in
-    //   `alloc_chunk` and hasn't been deallocated yet.
+    // - ???
 
-    for Chunk { lo, hi } in chunks.into_iter() {
-      let size = ptr_byte_diff(hi, lo);
-      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
-
-      unsafe { std::alloc::dealloc(lo, layout) }
-    }
+    unsafe { dealloc_chunk_list(self.lo, self.hi) };
   }
 }
 
@@ -317,7 +303,7 @@ impl<'a> ArenaAllocator<'a> {
     }
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Chunk { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Range { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -360,7 +346,7 @@ impl<'a> ArenaAllocator<'a> {
     let size = size_of_element * len;
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Chunk { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Range { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -425,10 +411,13 @@ impl<'a, T> ArenaSliceSlot<'a, T> {
       a.write(f(i));
     }
 
+    let slot: *mut [MaybeUninit<T>] = self.0;
+    let slot: *mut [T] = slot as *mut [T];
+
     // SAFETY:
     //
     // - Every slice element has been initialized.
 
-    unsafe { &mut *(self.0 as *mut [MaybeUninit<T>] as *mut [T]) }
+    unsafe { &mut *slot }
   }
 }
