@@ -70,7 +70,7 @@ trait InternalError {
   fn from_slice_too_long(len: usize) -> Self;
 }
 
-struct Range {
+struct Span {
   lo: *mut u8,
   hi: *mut u8,
 }
@@ -90,7 +90,7 @@ fn ptr_byte_diff<T>(p: *const T, q: *const T) -> usize {
 #[inline(always)]
 fn ptr_mask_mut<T>(p: *mut T, m: usize) -> *mut T {
   // #![feature(ptr_mask)] => `p.mask(m)`
-  p.cast::<u8>().wrapping_sub((p as usize) & ! m).cast::<T>()
+  (p as *mut u8).wrapping_sub((p as usize) & ! m) as *mut T
 }
 
 #[inline(always)]
@@ -103,8 +103,8 @@ unsafe fn dealloc_chunk_list(lo: *mut u8, hi: *mut u8) {
   let mut hi = hi;
 
   while ! hi.is_null() {
-    let size = ptr_byte_diff(hi, lo) + mem::size_of::<Range>();
-    let next = unsafe { hi.cast::<Range>().read() };
+    let size = ptr_byte_diff(hi, lo) + mem::size_of::<Span>();
+    let next = unsafe { (hi as *mut Span).read() };
 
     let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
 
@@ -217,7 +217,7 @@ impl Arena {
     let hi = self.hi;
 
     if ! hi.is_null() {
-      let next = unsafe { hi.cast::<Range>().replace(Range { lo: NULL, hi: NULL }) };
+      let next = unsafe { (hi as *mut Span).replace(Span { lo: NULL, hi: NULL }) };
 
       unsafe { dealloc_chunk_list(next.lo, next.hi) };
     }
@@ -225,12 +225,12 @@ impl Arena {
 
   #[inline(never)]
   #[cold]
-  fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Range, E>
+  fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Span, E>
     where E: InternalError
   {
     assert!(MIN_CHUNK_SIZE % CHUNK_ALIGN == 0);
-    assert!(mem::align_of::<Range>() <= CHUNK_ALIGN);
-    assert!(mem::size_of::<Range>() <= MIN_CHUNK_SIZE);
+    assert!(mem::align_of::<Span>() <= CHUNK_ALIGN);
+    assert!(mem::size_of::<Span>() <= MIN_CHUNK_SIZE);
 
     let total_allocated = self.total_allocated;
     let target = max(min_size, total_allocated / 4 + 1);
@@ -253,13 +253,13 @@ impl Arena {
 
     if lo.is_null() { return Err(E::from_global_alloc_error(layout)); }
 
-    let hi = lo.wrapping_add(size).wrapping_sub(mem::size_of::<Range>());
+    let hi = lo.wrapping_add(size).wrapping_sub(mem::size_of::<Span>());
 
     // SAFETY:
     //
     // - ???
 
-    unsafe { hi.cast::<Range>().write(Range { lo: self.lo, hi: self.hi }) };
+    unsafe { (hi as *mut Span).write(Span { lo: self.lo, hi: self.hi }) };
 
     // We're past possible error conditions, so actually update `self`.
 
@@ -267,7 +267,7 @@ impl Arena {
     self.hi = hi;
     self.total_allocated = total_allocated.saturating_add(size);
 
-    Ok(Range { lo, hi })
+    Ok(Span { lo, hi })
   }
 }
 
@@ -303,7 +303,7 @@ impl<'a> ArenaAllocator<'a> {
     }
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Range { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Span { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -346,7 +346,7 @@ impl<'a> ArenaAllocator<'a> {
     let size = size_of_element * len;
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Range { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Span { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
