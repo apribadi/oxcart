@@ -1,5 +1,3 @@
-#![feature(ptr_mask)]
-
 use core::alloc::Layout;
 use core::cmp::max;
 use core::mem::MaybeUninit;
@@ -10,36 +8,34 @@ use core::ptr;
 const CHUNK_ALIGN_LOG2: u8 = 6;
 const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
 const MIN_CHUNK_SIZE_LOG2: u8 = 16;
-const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
 const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
 const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
 
-pub struct ArenaStorage {
-  average: usize,
-  capacity: usize,
+pub struct Arena {
+  total_allocated: usize,
   chunks: Vec<Chunk>,
 }
 
-pub struct Arena<'a> {
+pub struct ArenaAllocator<'a> {
   lo: *mut u8,
   hi: *mut u8,
-  storage: &'a mut ArenaStorage,
+  arena: &'a mut Arena,
 }
 
 // SAFETY:
 //
-// The `ArenaStorage` and `Arena` types conform to the usual shared xor mutable
+// The `Arena` and `Arena` types conform to the usual shared xor mutable
 // discipline.
 
-unsafe impl Send for ArenaStorage {}
+unsafe impl Send for Arena {}
 
-unsafe impl Sync for ArenaStorage {}
+unsafe impl Sync for Arena {}
 
-unsafe impl<'a> Send for Arena<'a> {}
+unsafe impl<'a> Send for ArenaAllocator<'a> {}
 
-unsafe impl<'a> Sync for Arena<'a> {}
+unsafe impl<'a> Sync for ArenaAllocator<'a> {}
 
 pub struct ArenaSlot<'a, T: 'a>(&'a mut MaybeUninit<T>);
 
@@ -77,13 +73,14 @@ fn ok<T>(x: Result<T, Panicked>) -> T {
 }
 
 #[inline(always)]
-fn ptr_addr<T>(x: *mut T) -> usize {
-  x as usize
+fn ptr_byte_diff<T>(p: *const T, q: *const T) -> usize {
+  p as usize - q as usize
 }
 
 #[inline(always)]
-fn ptr_mask<T>(x: *mut T, m: usize) -> *mut T {
-  x.mask(m) // ((x as usize) & m) as *mut T
+fn ptr_mask_mut<T>(p: *mut T, m: usize) -> *mut T {
+  // #![feature(ptr_mask)] => `p.mask(m)`
+  (p as *mut u8).wrapping_sub((p as usize) & ! m) as *mut T
 }
 
 impl InternalError for ArenaError {
@@ -166,30 +163,36 @@ impl ChunkSizeClass {
   }
 }
 
-impl ArenaStorage {
+impl Arena {
   #[inline(always)]
   pub fn new() -> Self {
     Self {
-      average: MIN_CHUNK_SIZE,
-      capacity: 0,
+      total_allocated: 0,
       chunks: Vec::new(),
     }
   }
 
   #[inline(always)]
-  pub fn arena(&mut self) -> Arena<'_> {
-    self.reset();
-
-    Arena {
-      lo: ptr::null_mut(),
-      hi: ptr::null_mut(),
-      storage: self,
+  pub fn allocator(&mut self) -> ArenaAllocator<'_> {
+    match self.chunks.last() {
+      None =>
+        ArenaAllocator {
+          lo: ptr::null_mut(),
+          hi: ptr::null_mut(),
+          arena: self,
+        },
+      Some(&Chunk { lo, hi }) =>
+        ArenaAllocator {
+          lo,
+          hi,
+          arena: self,
+        },
     }
   }
 
   #[inline(always)]
   pub fn reset(&mut self) {
-    if self.capacity > 0 {
+    if ! self.chunks.is_empty() {
       self.internal_reset()
     }
   }
@@ -198,12 +201,6 @@ impl ArenaStorage {
   #[cold]
   fn internal_reset(&mut self) {
     let chunks = mem::replace(&mut self.chunks, Vec::new());
-
-    let average = self.average;
-    let capacity = self.capacity;
-
-    self.average = average / 2 + capacity / 2;
-    self.capacity = 0;
 
     // SAFETY:
     //
@@ -216,7 +213,7 @@ impl ArenaStorage {
     //   `alloc_chunk` and hasn't been deallocated yet.
 
     for Chunk { lo, hi } in chunks.into_iter() {
-      let size = ptr_addr(hi) - ptr_addr(lo);
+      let size = ptr_byte_diff(hi, lo);
       let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
 
       unsafe { std::alloc::dealloc(lo, layout) }
@@ -225,14 +222,15 @@ impl ArenaStorage {
 
   #[inline(never)]
   #[cold]
-  fn alloc_chunk<E: InternalError>(&mut self, min_size: usize) -> Result<Chunk, E> {
+  fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Chunk, E>
+    where E: InternalError
+  {
     // POSTCONDITION:
     //
     // - If `min_size <= MAX_OBJECT_SIZE`, then the returned `Chunk` has size
     //   `>= min_size`.
 
-    let average = self.average;
-    let capacity = self.capacity;
+    let total_allocated = self.total_allocated;
 
     // If we don't allocate any large individual objects, we get a sequence of
     // chunk sizes that looks like
@@ -241,10 +239,7 @@ impl ArenaStorage {
     //
     // as multiples of the minimum chunk size.
 
-    let target_0 = min_size;
-    let target_1 = average / 4;
-    let target_2 = capacity / 4 + 1;
-    let target = max(max(target_0, target_1), target_2);
+    let target = max(min_size, total_allocated / 4 + 1);
 
     let size_class = ChunkSizeClass::from_target(target);
     let size = size_class.size();
@@ -271,23 +266,41 @@ impl ArenaStorage {
 
     // TODO: `push` might fail.
 
-    self.capacity = capacity.saturating_add(size);
+    self.total_allocated = total_allocated.saturating_add(size);
     self.chunks.push(Chunk { lo, hi });
 
     Ok(Chunk { lo, hi })
   }
 }
 
-impl Drop for ArenaStorage {
+impl Drop for Arena {
   #[inline(always)]
   fn drop(&mut self) {
-    self.reset()
+    let chunks = mem::replace(&mut self.chunks, Vec::new());
+
+    // SAFETY:
+    //
+    // - Every lifetime of a reference to a previously allocated slot has
+    //   ended. It follows that it is safe to deallocate the chunks' memory.
+    // - The `layout` is the same as in `alloc_chunk`, so it has a valid size
+    //   and alignment.
+    // - The `lo` pointer was returned from `std::alloc::alloc` in
+    //   `alloc_chunk` and hasn't been deallocated yet.
+
+    for Chunk { lo, hi } in chunks.into_iter() {
+      let size = ptr_byte_diff(hi, lo);
+      let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+
+      unsafe { std::alloc::dealloc(lo, layout) }
+    }
   }
 }
 
-impl<'a> Arena<'a> {
+impl<'a> ArenaAllocator<'a> {
   #[inline(always)]
-  fn internal_alloc<T, E: InternalError>(&mut self) -> Result<ArenaSlot<'a, T>, E> {
+  fn internal_alloc<T, E>(&mut self) -> Result<ArenaSlot<'a, T>, E>
+    where E: InternalError
+  {
     let align = mem::align_of::<T>();
     let size = mem::size_of::<T>();
 
@@ -303,13 +316,13 @@ impl<'a> Arena<'a> {
       return Err(E::from_object_size_too_large(size));
     }
 
-    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
-      let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
+    if size > ptr_byte_diff(self.hi, self.lo) {
+      let Chunk { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
-    let hi = ptr_mask(self.hi.wrapping_sub(size), ! (align - 1));
+    let hi = ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1));
 
     // SAFETY:
     //
@@ -325,7 +338,9 @@ impl<'a> Arena<'a> {
   }
 
   #[inline(always)]
-  fn internal_alloc_slice<T, E: InternalError>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, E> {
+  fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, E>
+    where E: InternalError
+  {
     let align = mem::align_of::<T>();
     let size_of_element = mem::size_of::<T>();
     let max_len = MAX_OBJECT_SIZE / size_of_element;
@@ -344,13 +359,13 @@ impl<'a> Arena<'a> {
 
     let size = size_of_element * len;
 
-    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
-      let Chunk { lo, hi } = self.storage.alloc_chunk(size)?;
+    if size > ptr_byte_diff(self.hi, self.lo) {
+      let Chunk { lo, hi } = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
 
-    let hi = ptr_mask(self.hi.wrapping_sub(size), ! (align - 1));
+    let hi = ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1));
 
     // SAFETY:
     //
@@ -386,9 +401,11 @@ impl<'a> Arena<'a> {
   }
 
   #[inline(always)]
-  pub fn with<F, A>(f: F) -> A where for<'b> F: FnOnce(Arena<'b>) -> A {
-    let mut storage = ArenaStorage::new();
-    f(storage.arena())
+  pub fn with<F, A>(f: F) -> A
+    where F: for<'b> FnOnce(ArenaAllocator<'b>) -> A
+  {
+    let mut arena = Arena::new();
+    f(arena.allocator())
   }
 }
 
@@ -401,7 +418,9 @@ impl<'a, T> ArenaSlot<'a, T> {
 
 impl<'a, T> ArenaSliceSlot<'a, T> {
   #[inline(always)]
-  pub fn init<F>(self, mut f: F) -> &'a mut [T] where F: FnMut(usize) -> T {
+  pub fn init<F>(self, mut f: F) -> &'a mut [T]
+    where F: FnMut(usize) -> T
+  {
     for (i, a) in self.0.iter_mut().enumerate() {
       a.write(f(i));
     }

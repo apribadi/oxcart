@@ -1,7 +1,7 @@
 use std::time::Instant;
 use std::hint;
 use oxcart::Arena;
-use oxcart::ArenaStorage;
+use oxcart::ArenaAllocator;
 
 const COUNT: usize = 10_000_000;
 
@@ -35,10 +35,10 @@ fn run_bench<F, A, B>(name: &str, t: A, f: F) where F: Fn(A, usize) -> B {
 }
 
 #[inline(never)]
-fn bench_oxcart<'a>(arena: &mut Arena<'a>, count: usize) -> List<'a, u64> {
+fn bench_oxcart<'a>(aa: &mut ArenaAllocator<'a>, count: usize) -> List<'a, u64> {
   let mut r = List::Nil;
   for i in 0 .. count {
-    r = List::Cons(arena.alloc().init(Node { car: i as u64, cdr: r }));
+    r = List::Cons(aa.alloc().init(Node { car: i as u64, cdr: r }));
   }
   r
 }
@@ -55,10 +55,10 @@ fn bench_bumpalo<'a>(bump: &'a bumpalo::Bump, count: usize) -> List<'a, u64> {
 fn main() {
   warmup();
 
-  let mut storage = ArenaStorage::new();
-  let mut arena = storage.arena();
+  let mut arena = Arena::new();
+  let mut aa = arena.allocator();
   let bump = &bumpalo::Bump::new();
 
-  run_bench("oxcart", &mut arena, bench_oxcart);
+  run_bench("oxcart", &mut aa, bench_oxcart);
   run_bench("bumpalo", bump, bench_bumpalo);
 }
