@@ -12,23 +12,28 @@ use core::mem;
 use core::slice;
 use core::ptr;
 
-const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
 const CHUNK_ALIGN_LOG2: u8 = 6;
-const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
-const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
-const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
-const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE;
-const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
+const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
+
 const MIN_CHUNK_SIZE_LOG2: u8 = 14;
-const NULL: *mut u8 = ptr::null_mut();
+const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
+
+const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
+const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
+
+const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
+const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE - mem::size_of::<Tail>();
+
+const _: () = assert!(mem::align_of::<Tail>() <= CHUNK_ALIGN);
+const _: () = assert!(mem::size_of::<Tail>() <= MIN_CHUNK_SIZE);
 
 pub struct Arena {
   lo: *mut u8,
-  hi: *mut u8,
+  hi: *mut Tail,
   total_allocated: usize,
 }
 
-pub struct ArenaAllocator<'a> {
+pub struct Allocator<'a> {
   lo: *mut u8,
   hi: *mut u8,
   arena: &'a mut Arena,
@@ -36,23 +41,23 @@ pub struct ArenaAllocator<'a> {
 
 // SAFETY:
 //
-// The `Arena` and `Arena` types conform to the usual shared xor mutable
+// The `Arena` and `Allocator` types conform to the usual shared xor mutable
 // discipline.
 
 unsafe impl Send for Arena {}
 
 unsafe impl Sync for Arena {}
 
-unsafe impl<'a> Send for ArenaAllocator<'a> {}
+unsafe impl<'a> Send for Allocator<'a> {}
 
-unsafe impl<'a> Sync for ArenaAllocator<'a> {}
+unsafe impl<'a> Sync for Allocator<'a> {}
 
-pub struct ArenaSlot<'a, T: 'a>(&'a mut MaybeUninit<T>);
+pub struct Slot<'a, T: 'a>(&'a mut MaybeUninit<T>);
 
-pub struct ArenaSliceSlot<'a, T: 'a>(&'a mut [MaybeUninit<T>]);
+pub struct SliceSlot<'a, T: 'a>(&'a mut [MaybeUninit<T>]);
 
 #[derive(Clone, Debug)]
-pub enum ArenaError {
+pub enum AllocError {
   GlobalAllocError,
   ObjectAlignTooLarge,
   ObjectSizeTooLarge,
@@ -70,10 +75,9 @@ trait InternalError {
   fn from_slice_too_long(len: usize) -> Self;
 }
 
-struct Span {
-  lo: *mut u8,
-  hi: *mut u8,
-}
+struct Tail(*mut u8, *mut Tail);
+
+struct Span(*mut u8, *mut u8);
 
 struct ChunkSizeClass(u8);
 
@@ -83,39 +87,43 @@ fn ok<T>(x: Result<T, Panicked>) -> T {
 }
 
 #[inline(always)]
-fn ptr_byte_diff<T>(p: *const T, q: *const T) -> usize {
+fn ptr_byte_diff<T, U>(p: *const T, q: *const U) -> usize {
   p as usize - q as usize
 }
 
 #[inline(always)]
 fn ptr_mask_mut<T>(p: *mut T, m: usize) -> *mut T {
-  // #![feature(ptr_mask)] => `p.mask(m)`
+  // NB: This expression preserves pointer provenance and should be optimized
+  // into `p & m`.
+  //
+  // Once the `ptr_mask` feature is stabilized, we can just use `p.mask(m)`.
+
   (p as *mut u8).wrapping_sub((p as usize) & ! m) as *mut T
 }
 
 #[inline(always)]
-unsafe fn dealloc_chunk_list(lo: *mut u8, hi: *mut u8) {
+unsafe fn dealloc_chunk_list(lo: *mut u8, hi: *mut Tail) {
+  let mut lo = lo;
+  let mut hi = hi;
+
   // SAFETY:
   //
   // - ???
 
-  let mut lo = lo;
-  let mut hi = hi;
-
   while ! hi.is_null() {
-    let size = ptr_byte_diff(hi, lo) + mem::size_of::<Span>();
-    let next = unsafe { (hi as *mut Span).read() };
+    let size = ptr_byte_diff(hi, lo) + mem::size_of::<Tail>();
+    let next = unsafe { hi.read() };
 
     let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
 
     unsafe { std::alloc::dealloc(lo, layout) }
 
-    lo = next.lo;
-    hi = next.hi;
+    lo = next.0;
+    hi = next.1;
   }
 }
 
-impl InternalError for ArenaError {
+impl InternalError for AllocError {
   #[inline(always)]
   fn from_global_alloc_error(_: Layout) -> Self {
     Self::GlobalAllocError
@@ -175,23 +183,20 @@ impl InternalError for Panicked {
 }
 
 impl ChunkSizeClass {
-  const MIN: Self = Self(MIN_CHUNK_SIZE_LOG2);
-  const MAX: Self = Self(MAX_CHUNK_SIZE_LOG2);
+  fn from_target(n: usize) -> Self {
+    if n <= MIN_CHUNK_SIZE {
+      Self(MIN_CHUNK_SIZE_LOG2)
+    } else if n > MAX_CHUNK_SIZE {
+      Self(MAX_CHUNK_SIZE_LOG2)
+    } else {
+      Self((usize::BITS - (n - 1).leading_zeros()) as u8)
+    }
+  }
 
   // `1 <= size <= isize::MAX`
 
   fn size(self) -> usize {
     1 << self.0
-  }
-
-  fn from_target(n: usize) -> Self {
-    if n <= Self::MIN.size() {
-      Self::MIN
-    } else if n > Self::MAX.size() {
-      Self::MAX
-    } else {
-      Self((usize::BITS - (n - 1).leading_zeros()) as u8)
-    }
   }
 }
 
@@ -199,27 +204,35 @@ impl Arena {
   #[inline(always)]
   pub fn new() -> Self {
     Self {
-      lo: NULL,
-      hi: NULL,
+      lo: ptr::null_mut(),
+      hi: ptr::null_mut(),
       total_allocated: 0,
     }
   }
 
   #[inline(always)]
-  pub fn allocator(&mut self) -> ArenaAllocator<'_> {
-    ArenaAllocator { lo: self.lo, hi: self.hi, arena: self, }
+  pub fn allocator(&mut self) -> Allocator<'_> {
+    Allocator {
+      lo: self.lo,
+      hi: self.hi as *mut u8,
+      arena: self,
+    }
   }
 
   #[inline(always)]
   pub fn reset(&mut self) {
-    // Retain the top of the stack, dealloc everything else.
+    // Retain the top of the stack and dealloc every other chunk.
 
     let hi = self.hi;
 
-    if ! hi.is_null() {
-      let next = unsafe { (hi as *mut Span).replace(Span { lo: NULL, hi: NULL }) };
+    // SAFETY:
+    //
+    // - ???
 
-      unsafe { dealloc_chunk_list(next.lo, next.hi) };
+    if ! hi.is_null() {
+      let next = unsafe { hi.replace(Tail(ptr::null_mut(), ptr::null_mut())) };
+
+      unsafe { dealloc_chunk_list(next.0, next.1) };
     }
   }
 
@@ -228,12 +241,13 @@ impl Arena {
   fn alloc_chunk<E>(&mut self, min_size: usize) -> Result<Span, E>
     where E: InternalError
   {
-    assert!(MIN_CHUNK_SIZE % CHUNK_ALIGN == 0);
-    assert!(mem::align_of::<Span>() <= CHUNK_ALIGN);
-    assert!(mem::size_of::<Span>() <= MIN_CHUNK_SIZE);
+    // POSTCONDITION:
+    //
+    // - If `min_size <= MAX_OBJECT_SIZE`, then the returned `Span` has size
+    //   at least `min_size`.
 
     let total_allocated = self.total_allocated;
-    let target = max(min_size, total_allocated / 4 + 1);
+    let target = max(min_size + mem::size_of::<Tail>(), total_allocated / 4 + 1);
     let size_class = ChunkSizeClass::from_target(target);
     let size = size_class.size();
 
@@ -253,13 +267,13 @@ impl Arena {
 
     if lo.is_null() { return Err(E::from_global_alloc_error(layout)); }
 
-    let hi = lo.wrapping_add(size).wrapping_sub(mem::size_of::<Span>());
+    let hi = lo.wrapping_add(size).wrapping_sub(mem::size_of::<Tail>()) as *mut Tail;
 
     // SAFETY:
     //
     // - ???
 
-    unsafe { (hi as *mut Span).write(Span { lo: self.lo, hi: self.hi }) };
+    unsafe { hi.write(Tail(self.lo, self.hi)) };
 
     // We're past possible error conditions, so actually update `self`.
 
@@ -267,7 +281,7 @@ impl Arena {
     self.hi = hi;
     self.total_allocated = total_allocated.saturating_add(size);
 
-    Ok(Span { lo, hi })
+    Ok(Span(lo, hi as *mut u8))
   }
 }
 
@@ -282,9 +296,9 @@ impl Drop for Arena {
   }
 }
 
-impl<'a> ArenaAllocator<'a> {
+impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn internal_alloc<T, E>(&mut self) -> Result<ArenaSlot<'a, T>, E>
+  fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
     where E: InternalError
   {
     let align = mem::align_of::<T>();
@@ -303,7 +317,7 @@ impl<'a> ArenaAllocator<'a> {
     }
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Span { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Span(lo, hi) = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -320,11 +334,11 @@ impl<'a> ArenaAllocator<'a> {
 
     self.hi = hi;
 
-    Ok(ArenaSlot(slot))
+    Ok(Slot(slot))
   }
 
   #[inline(always)]
-  fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, E>
+  fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<SliceSlot<'a, T>, E>
     where E: InternalError
   {
     let align = mem::align_of::<T>();
@@ -346,7 +360,7 @@ impl<'a> ArenaAllocator<'a> {
     let size = size_of_element * len;
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Span { lo, hi } = self.arena.alloc_chunk(size)?;
+      let Span(lo, hi) = self.arena.alloc_chunk(size)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -363,46 +377,46 @@ impl<'a> ArenaAllocator<'a> {
 
     self.hi = hi;
 
-    Ok(ArenaSliceSlot(slot))
+    Ok(SliceSlot(slot))
   }
 
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> ArenaSlot<'a, T> {
+  pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     ok(self.internal_alloc())
   }
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<ArenaSlot<'a, T>, ArenaError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     self.internal_alloc()
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> ArenaSliceSlot<'a, T> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> SliceSlot<'a, T> {
     ok(self.internal_alloc_slice(len))
   }
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<ArenaSliceSlot<'a, T>, ArenaError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<SliceSlot<'a, T>, AllocError> {
     self.internal_alloc_slice(len)
   }
 
   #[inline(always)]
   pub fn with<F, A>(f: F) -> A
-    where F: for<'b> FnOnce(ArenaAllocator<'b>) -> A
+    where F: for<'b> FnOnce(Allocator<'b>) -> A
   {
     let mut arena = Arena::new();
     f(arena.allocator())
   }
 }
 
-impl<'a, T> ArenaSlot<'a, T> {
+impl<'a, T> Slot<'a, T> {
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
     self.0.write(value)
   }
 }
 
-impl<'a, T> ArenaSliceSlot<'a, T> {
+impl<'a, T> SliceSlot<'a, T> {
   #[inline(always)]
   pub fn init<F>(self, mut f: F) -> &'a mut [T]
     where F: FnMut(usize) -> T

@@ -1,7 +1,7 @@
 use std::time::Instant;
 use std::hint;
+use oxcart::Allocator;
 use oxcart::Arena;
-use oxcart::ArenaAllocator;
 
 const COUNT: usize = 10_000_000;
 
@@ -35,7 +35,7 @@ fn run_bench<F, A, B>(name: &str, t: A, f: F) where F: Fn(A, usize) -> B {
 }
 
 #[inline(never)]
-fn bench_oxcart<'a>(aa: &mut ArenaAllocator<'a>, count: usize) -> List<'a, u64> {
+fn bench_oxcart<'a>(aa: &mut Allocator<'a>, count: usize) -> List<'a, u64> {
   let mut r = List::Nil;
   for i in 0 .. count {
     r = List::Cons(aa.alloc().init(Node { car: i as u64, cdr: r }));

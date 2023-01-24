@@ -1,6 +1,5 @@
 pub use expect_test::expect;
 pub use oxcart::Arena;
-pub use oxcart::ArenaAllocator;
 
 enum List<'a, A> {
   Nil,
