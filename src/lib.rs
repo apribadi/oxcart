@@ -1,3 +1,5 @@
+//! An arena allocator.
+
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(elided_lifetimes_in_paths)]
@@ -57,26 +59,32 @@ unsafe impl<'a> Send for Allocator<'a> {}
 
 unsafe impl<'a> Sync for Allocator<'a> {}
 
+/// A reference to an uninitialized slot in the arena.
+
 pub struct Slot<'a, T: 'a>(pub &'a mut MaybeUninit<T>);
 
+/// A reference to an uninitialized slot for a slice of values in the arena.
+
 pub struct SliceSlot<'a, T: 'a>(pub &'a mut [MaybeUninit<T>]);
+
+/// A cause of an allocation failure.
 
 #[derive(Clone, Debug)]
 pub enum AllocError {
   GlobalAllocError,
-  ObjectAlignTooLarge,
-  ObjectSizeTooLarge,
-  ObjectTypeNeedsDrop,
   SliceTooLong,
+  TypeAlignTooLarge,
+  TypeNeedsDrop,
+  TypeSizeTooLarge,
 }
 
 enum Panicked {}
 
 trait InternalError {
   fn from_global_alloc_error(layout: Layout) -> Self;
-  fn from_object_align_too_large(align: usize) -> Self;
-  fn from_object_size_too_large(size: usize) -> Self;
-  fn from_object_type_needs_drop() -> Self;
+  fn from_type_align_too_large(align: usize) -> Self;
+  fn from_type_size_too_large(size: usize) -> Self;
+  fn from_type_needs_drop() -> Self;
   fn from_slice_too_long(len: usize) -> Self;
 }
 
@@ -96,8 +104,8 @@ fn ptr_byte_diff<T, U>(p: *const T, q: *const U) -> usize {
 
 #[inline(always)]
 fn ptr_mask_mut<T>(p: *mut T, m: usize) -> *mut T {
-  // NB: This expression preserves pointer provenance and should be optimized
-  // into `p & m`.
+  // This expression preserves pointer provenance and should be optimized into
+  // `p & m`.
   //
   // Once the `ptr_mask` feature is stabilized, we can just use `p.mask(m)`.
 
@@ -128,23 +136,23 @@ impl InternalError for AllocError {
   }
 
   #[inline(always)]
-  fn from_object_align_too_large(_: usize) -> Self {
-    Self::ObjectAlignTooLarge
-  }
-
-  #[inline(always)]
-  fn from_object_size_too_large(_: usize) -> Self {
-    Self::ObjectSizeTooLarge
-  }
-
-  #[inline(always)]
-  fn from_object_type_needs_drop() -> Self {
-    Self::ObjectTypeNeedsDrop
-  }
-
-  #[inline(always)]
   fn from_slice_too_long(_: usize) -> Self {
     Self::SliceTooLong
+  }
+
+  #[inline(always)]
+  fn from_type_align_too_large(_: usize) -> Self {
+    Self::TypeAlignTooLarge
+  }
+
+  #[inline(always)]
+  fn from_type_needs_drop() -> Self {
+    Self::TypeNeedsDrop
+  }
+
+  #[inline(always)]
+  fn from_type_size_too_large(_: usize) -> Self {
+    Self::TypeSizeTooLarge
   }
 }
 
@@ -157,30 +165,32 @@ impl InternalError for Panicked {
 
   #[inline(never)]
   #[cold]
-  fn from_object_align_too_large(align: usize) -> Self {
-    panic!("object align too large: {:?}", align)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_object_size_too_large(size: usize) -> Self {
-    panic!("object size too large: {:?}", size)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_object_type_needs_drop() -> Self {
-    panic!("object type needs drop")
-  }
-
-  #[inline(never)]
-  #[cold]
   fn from_slice_too_long(len: usize) -> Self {
     panic!("slice too long: {:?}", len)
+  }
+
+  #[inline(never)]
+  #[cold]
+  fn from_type_align_too_large(align: usize) -> Self {
+    panic!("type align too large: {:?}", align)
+  }
+
+  #[inline(never)]
+  #[cold]
+  fn from_type_needs_drop() -> Self {
+    panic!("type needs drop")
+  }
+
+  #[inline(never)]
+  #[cold]
+  fn from_type_size_too_large(size: usize) -> Self {
+    panic!("type size too large: {:?}", size)
   }
 }
 
 impl Arena {
+  /// Creates a new arena.
+
   #[inline(always)]
   pub fn new() -> Self {
     Self {
@@ -190,6 +200,9 @@ impl Arena {
     }
   }
 
+  /// Creates a handle to allocate from the arena. Allocated objects are live
+  /// for the lifetime of this mutable borrow.
+
   #[inline(always)]
   pub fn allocator(&mut self) -> Allocator<'_> {
     Allocator {
@@ -198,6 +211,8 @@ impl Arena {
       arena: self,
     }
   }
+
+  /// Deallocates all but one chunk of memory.
 
   pub fn reset(&mut self) {
     // Retain the top of the stack and dealloc every other chunk.
@@ -278,15 +293,15 @@ impl<'a> Allocator<'a> {
     let size = size_of::<T>();
 
     if /* const */ needs_drop::<T>() {
-      return Err(E::from_object_type_needs_drop());
+      return Err(E::from_type_needs_drop());
     }
 
     if /* const */ align > MAX_OBJECT_ALIGN {
-      return Err(E::from_object_align_too_large(align));
+      return Err(E::from_type_align_too_large(align));
     }
 
     if /* const */ size > MAX_OBJECT_SIZE {
-      return Err(E::from_object_size_too_large(size));
+      return Err(E::from_type_size_too_large(size));
     }
 
     if size > ptr_byte_diff(self.hi, self.lo) {
@@ -319,11 +334,11 @@ impl<'a> Allocator<'a> {
     let max_len = MAX_OBJECT_SIZE / size_of_element;
 
     if /* const */ needs_drop::<T>() {
-      return Err(E::from_object_type_needs_drop());
+      return Err(E::from_type_needs_drop());
     }
 
     if /* const */ align > MAX_OBJECT_ALIGN {
-      return Err(E::from_object_align_too_large(align));
+      return Err(E::from_type_align_too_large(align));
     }
 
     if len > max_len {
@@ -353,20 +368,50 @@ impl<'a> Allocator<'a> {
     Ok(SliceSlot(slot))
   }
 
+  /// Allocates a slot for a single object.
+  ///
+  /// # Panics
+  ///
+  /// - Panics if acquiring memory from the global allocator fails.
+  /// - Panics if the type has a non-trivial `drop`.
+  /// - Panics if the alignment of the type is greater than 64 bytes.
+  /// - Panics if the size of the type is too large.
+
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     unwrap(self.internal_alloc())
   }
+
+  /// Allocates a slot for a single object.
+  ///
+  /// # Errors
+  ///
+  /// See panic conditions for [`alloc`](Self::alloc).
 
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     self.internal_alloc()
   }
 
+  /// Allocates a slot for a slice of the given length.
+  ///
+  /// # Panics
+  ///
+  /// - Panics if acquiring memory from the global allocator fails.
+  /// - Panics if the type has a non-trivial `drop`.
+  /// - Panics if the alignment of the type is greater than 64 bytes.
+  /// - Panics if the length of the slice is too large.
+
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> SliceSlot<'a, T> {
     unwrap(self.internal_alloc_slice(len))
   }
+
+  /// Allocates a slot for a slice of the given length.
+  ///
+  /// # Errors
+  ///
+  /// See panic conditions for [`alloc_slice`](Self::alloc_slice).
 
   #[inline(always)]
   pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<SliceSlot<'a, T>, AllocError> {
@@ -375,6 +420,8 @@ impl<'a> Allocator<'a> {
 }
 
 impl<'a, T> Slot<'a, T> {
+  /// Initializes the object with the given value.
+
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
     self.0.write(value)
@@ -382,6 +429,9 @@ impl<'a, T> Slot<'a, T> {
 }
 
 impl<'a, T> SliceSlot<'a, T> {
+  /// Initializes the slice from values produced by calling the given function
+  /// with each index in order.
+
   #[inline(always)]
   pub fn init<F>(self, mut f: F) -> &'a mut [T]
     where F: FnMut(usize) -> T
