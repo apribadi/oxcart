@@ -28,8 +28,13 @@ const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
 const MAX_CHUNK_SIZE_LOG2: u8 = usize::BITS as u8 - 2;
 const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 
-const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
-const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE - size_of::<Tail>();
+/// The maximum supported alignment for any object in the arena.
+
+pub const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
+
+/// The maximum supported size for any object in the arena.
+///
+pub const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE - size_of::<Tail>();
 
 const _: () = assert!(align_of::<Tail>() <= CHUNK_ALIGN);
 const _: () = assert!(size_of::<Tail>() <= MIN_CHUNK_SIZE);
@@ -61,15 +66,12 @@ unsafe impl<'a> Sync for Allocator<'a> {}
 
 /// A reference to an uninitialized slot in the arena.
 
-pub struct Slot<'a, T: 'a>(pub &'a mut MaybeUninit<T>);
-
-/// A reference to an uninitialized slot for a slice of values in the arena.
-
-pub struct SliceSlot<'a, T: 'a>(pub &'a mut [MaybeUninit<T>]);
+pub struct Slot<'a, T: 'a + ?Sized>(pub &'a mut T);
 
 /// A cause of an allocation failure.
 
 #[derive(Clone, Debug)]
+#[non_exhaustive]
 pub enum AllocError {
   GlobalAllocError,
   SliceTooLong,
@@ -237,7 +239,10 @@ impl Arena {
     //   at least `object_size`.
 
     let total_allocated = self.total_allocated;
-    let target = max(object_size + size_of::<Tail>(), total_allocated / 4 + 1);
+
+    let target_0 = object_size + size_of::<Tail>();
+    let target_1 = total_allocated / 4 + 1;
+    let target = max(target_0, target_1);
 
     let size =
       if target <= MIN_CHUNK_SIZE {
@@ -286,7 +291,7 @@ impl Drop for Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
+  fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, E>
     where E: InternalError
   {
     let align = align_of::<T>();
@@ -326,7 +331,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<SliceSlot<'a, T>, E>
+  fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [MaybeUninit<T>]>, E>
     where E: InternalError
   {
     let align = align_of::<T>();
@@ -365,7 +370,7 @@ impl<'a> Allocator<'a> {
 
     self.hi = hi;
 
-    Ok(SliceSlot(slot))
+    Ok(Slot(slot))
   }
 
   /// Allocates a slot for a single object.
@@ -374,11 +379,11 @@ impl<'a> Allocator<'a> {
   ///
   /// - Panics if acquiring memory from the global allocator fails.
   /// - Panics if the type has a non-trivial `drop`.
-  /// - Panics if the alignment of the type is greater than 64 bytes.
-  /// - Panics if the size of the type is too large.
+  /// - Panics if the alignment of the type is greater than [`MAX_OBJECT_ALIGN`].
+  /// - Panics if the size of the type is greater than [`MAX_OBJECT_SIZE`].
 
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> Slot<'a, T> {
+  pub fn alloc<T>(&mut self) -> Slot<'a, MaybeUninit<T>> {
     unwrap(self.internal_alloc())
   }
 
@@ -389,7 +394,7 @@ impl<'a> Allocator<'a> {
   /// See panic conditions for [`alloc`](Self::alloc).
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, AllocError> {
     self.internal_alloc()
   }
 
@@ -399,11 +404,12 @@ impl<'a> Allocator<'a> {
   ///
   /// - Panics if acquiring memory from the global allocator fails.
   /// - Panics if the type has a non-trivial `drop`.
-  /// - Panics if the alignment of the type is greater than 64 bytes.
-  /// - Panics if the length of the slice is too large.
+  /// - Panics if the alignment of the type is greater than [`MAX_OBJECT_ALIGN`].
+  /// - Panics if the an array of the given length would have size greater than
+  ///   [`MAX_OBJECT_SIZE`].
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> SliceSlot<'a, T> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [MaybeUninit<T>]> {
     unwrap(self.internal_alloc_slice(len))
   }
 
@@ -414,12 +420,12 @@ impl<'a> Allocator<'a> {
   /// See panic conditions for [`alloc_slice`](Self::alloc_slice).
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<SliceSlot<'a, T>, AllocError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [MaybeUninit<T>]>, AllocError> {
     self.internal_alloc_slice(len)
   }
 }
 
-impl<'a, T> Slot<'a, T> {
+impl<'a, T> Slot<'a, MaybeUninit<T>> {
   /// Initializes the object with the given value.
 
   #[inline(always)]
@@ -428,14 +434,16 @@ impl<'a, T> Slot<'a, T> {
   }
 }
 
-impl<'a, T> SliceSlot<'a, T> {
+impl<'a, T> Slot<'a, [MaybeUninit<T>]> {
   /// Initializes the slice from values produced by calling the given function
   /// with each index in order.
 
   #[inline(always)]
-  pub fn init<F>(self, mut f: F) -> &'a mut [T]
+  pub fn init<F>(self, f: F) -> &'a mut [T]
     where F: FnMut(usize) -> T
   {
+    let mut f = f;
+
     for (i, a) in self.0.iter_mut().enumerate() {
       a.write(f(i));
     }

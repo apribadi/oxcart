@@ -31,15 +31,9 @@ fn test_arena() {
 
   let mut aa = arena.allocator();
 
-  let x = aa.alloc().init(0);
-  let y = aa.alloc().init(0);
-  let z = aa.alloc().init(0);
+  let x = aa.alloc_slice(3).init(|i| (i as u64) + 1);
 
-  *x = 1;
-  *y = 2;
-  *z = 3;
-
-  assert!(*x + *y + *z == 6);
+  assert!(x[0] + x[1] + x[2] == 6);
 }
 
 #[test]
