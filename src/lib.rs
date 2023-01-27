@@ -1,4 +1,18 @@
 //! An arena allocator.
+//!
+//! # Example
+//!
+//! ```
+//! let mut arena = oxcart::Arena::new();
+//! let mut allocator = arena.allocator();
+//! let x: &mut u64 = allocator.alloc().init(42);
+//! *x += 1;
+//! assert!(*x == 43);
+//! arena.reset();
+//! let mut allocator = arena.allocator();
+//! let y: &mut [u64] = allocator.alloc_slice(100).init(|i| i as u64);
+//! assert!(y.iter().sum::<u64>() == 4950);
+//! ```
 
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
@@ -33,7 +47,7 @@ const MAX_CHUNK_SIZE: usize = 1 << MAX_CHUNK_SIZE_LOG2;
 pub const MAX_OBJECT_ALIGN: usize = CHUNK_ALIGN;
 
 /// The maximum supported size for any object in the arena.
-///
+
 pub const MAX_OBJECT_SIZE: usize = MAX_CHUNK_SIZE - size_of::<Tail>();
 
 const _: () = assert!(align_of::<Tail>() <= CHUNK_ALIGN);
@@ -202,8 +216,8 @@ impl Arena {
     }
   }
 
-  /// Creates a handle to allocate from the arena. Allocated objects are live
-  /// for the lifetime of this mutable borrow.
+  /// Creates a handle with which to allocate from the arena. Allocated objects
+  /// are live for the lifetime of this mutable borrow.
 
   #[inline(always)]
   pub fn allocator(&mut self) -> Allocator<'_> {
@@ -214,7 +228,9 @@ impl Arena {
     }
   }
 
-  /// Deallocates all but one chunk of memory.
+  /// Deallocates all but one chunk of memory. Calling this method (or, indeed,
+  /// any method) on the arena implies that the lifetime of any previously
+  /// allocated object has ended.
 
   pub fn reset(&mut self) {
     // Retain the top of the stack and dealloc every other chunk.
@@ -378,7 +394,7 @@ impl<'a> Allocator<'a> {
   /// # Panics
   ///
   /// - Panics if acquiring memory from the global allocator fails.
-  /// - Panics if the type has a non-trivial `drop`.
+  /// - Panics if the type implements [`drop`](Drop).
   /// - Panics if the alignment of the type is greater than [`MAX_OBJECT_ALIGN`].
   /// - Panics if the size of the type is greater than [`MAX_OBJECT_SIZE`].
 
@@ -403,10 +419,11 @@ impl<'a> Allocator<'a> {
   /// # Panics
   ///
   /// - Panics if acquiring memory from the global allocator fails.
-  /// - Panics if the type has a non-trivial `drop`.
-  /// - Panics if the alignment of the type is greater than [`MAX_OBJECT_ALIGN`].
-  /// - Panics if the an array of the given length would have size greater than
-  ///   [`MAX_OBJECT_SIZE`].
+  /// - Panics if the element type implements [`drop`](Drop).
+  /// - Panics if the alignment of the element type is greater than
+  ///   [`MAX_OBJECT_ALIGN`].
+  /// - Panics if the an array of the given element type and length would have
+  ///   size greater than [`MAX_OBJECT_SIZE`].
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [MaybeUninit<T>]> {
@@ -435,7 +452,7 @@ impl<'a, T> Slot<'a, MaybeUninit<T>> {
 }
 
 impl<'a, T> Slot<'a, [MaybeUninit<T>]> {
-  /// Initializes the slice from values produced by calling the given function
+  /// Initializes the slice with values produced by calling the given function
   /// with each index in order.
 
   #[inline(always)]
