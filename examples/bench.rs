@@ -46,7 +46,7 @@ fn run_bench<F>(name: &str, f: F) where F: Fn(usize, usize) -> () {
   let count_0 = hint::black_box(COUNT_0);
   let count_1 = hint::black_box(COUNT_1);
   let elapsed = timeit(|| f(count_0, count_1));
-  print!("{:25} {:.3} ns\n", name, elapsed / ((COUNT_0 * COUNT_1) as f64));
+  print!("{:25} {:.3} ns\n", name, elapsed / ((count_0 * count_1) as f64));
 }
 
 #[inline(never)]

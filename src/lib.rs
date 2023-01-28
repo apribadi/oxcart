@@ -33,6 +33,9 @@ use core::mem::size_of;
 use core::ptr::null_mut;
 use core::slice;
 
+const MIN_CHUNK_ALIGN_LOG2: u8 = 6;
+const MIN_CHUNK_ALIGN: usize = 1 << MIN_CHUNK_ALIGN_LOG2;
+
 const CHUNK_ALIGN_LOG2: u8 = 6;
 const CHUNK_ALIGN: usize = 1 << CHUNK_ALIGN_LOG2;
 
@@ -85,28 +88,30 @@ pub struct Slot<'a, T: 'a + ?Sized>(pub &'a mut T);
 /// A cause of an allocation failure.
 
 #[derive(Clone, Debug)]
-#[non_exhaustive]
-pub enum AllocError {
-  GlobalAllocError,
-  SliceTooLong,
-  TypeAlignTooLarge,
-  TypeNeedsDrop,
-  TypeSizeTooLarge,
-}
+pub struct AllocError {}
 
 enum Panicked {}
 
-trait InternalError {
-  fn from_global_alloc_error(layout: Layout) -> Self;
-  fn from_type_align_too_large(align: usize) -> Self;
-  fn from_type_size_too_large(size: usize) -> Self;
-  fn from_type_needs_drop() -> Self;
-  fn from_slice_too_long(len: usize) -> Self;
+enum InternalError {
+  GlobalAllocError(Layout),
+  LayoutError,
+  SliceTooLong(usize),
+  TypeAlignTooLarge(usize),
+  TypeNeedsDrop,
+  TypeSizeTooLarge(usize),
 }
 
 struct Tail(*mut u8, *mut Tail);
 
 struct Span(*mut u8, *mut u8);
+
+#[inline(always)]
+const fn align_up(size: usize, align: usize) -> usize {
+  // This assumes that `align` is a power of two.  In some cases, the result
+  // will overflow to zero.
+
+  size.wrapping_add(align).wrapping_sub(1) & ! (align - 1)
+}
 
 #[inline(always)]
 fn unwrap<T>(x: Result<T, Panicked>) -> T {
@@ -145,62 +150,25 @@ unsafe fn dealloc_chunk_list(lo: *mut u8, hi: *mut Tail) {
   }
 }
 
-impl InternalError for AllocError {
+impl From<InternalError> for AllocError {
   #[inline(always)]
-  fn from_global_alloc_error(_: Layout) -> Self {
-    Self::GlobalAllocError
-  }
-
-  #[inline(always)]
-  fn from_slice_too_long(_: usize) -> Self {
-    Self::SliceTooLong
-  }
-
-  #[inline(always)]
-  fn from_type_align_too_large(_: usize) -> Self {
-    Self::TypeAlignTooLarge
-  }
-
-  #[inline(always)]
-  fn from_type_needs_drop() -> Self {
-    Self::TypeNeedsDrop
-  }
-
-  #[inline(always)]
-  fn from_type_size_too_large(_: usize) -> Self {
-    Self::TypeSizeTooLarge
+  fn from(_: InternalError) -> Self {
+    Self {}
   }
 }
 
-impl InternalError for Panicked {
+impl From<InternalError> for Panicked {
   #[inline(never)]
   #[cold]
-  fn from_global_alloc_error(layout: Layout) -> Self {
-    alloc::alloc::handle_alloc_error(layout)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_slice_too_long(len: usize) -> Self {
-    panic!("slice too long: {:?}", len)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_type_align_too_large(align: usize) -> Self {
-    panic!("type align too large: {:?}", align)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_type_needs_drop() -> Self {
-    panic!("type needs drop")
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn from_type_size_too_large(size: usize) -> Self {
-    panic!("type size too large: {:?}", size)
+  fn from(e: InternalError) -> Self {
+    match e {
+      InternalError::GlobalAllocError(layout) => alloc::alloc::handle_alloc_error(layout),
+      InternalError::LayoutError => panic!("layout error"),
+      InternalError::SliceTooLong(len) => panic!("slice too long: {len:?}"),
+      InternalError::TypeAlignTooLarge(align) => panic!("type align too large: {align:?}"),
+      InternalError::TypeNeedsDrop => panic!("type needs drop"),
+      InternalError::TypeSizeTooLarge(size) => panic!("type size too large: {size:?}"),
+    }
   }
 }
 
@@ -246,36 +214,60 @@ impl Arena {
 
   #[inline(never)]
   #[cold]
-  fn alloc_chunk_for<E>(&mut self, object_size: usize) -> Result<Span, E>
-    where E: InternalError
+  fn alloc_chunk_for<E>(&mut self, object_layout: Layout) -> Result<Span, E>
+    where E: From<InternalError>
   {
-    // POSTCONDITION:
+    const _: () = assert!(align_of::<Tail>() <= MIN_CHUNK_ALIGN);
+    const _: () = assert!(MIN_CHUNK_SIZE % MIN_CHUNK_ALIGN == 0);
+    const _: () = assert!(MIN_CHUNK_SIZE <= isize::MAX as usize);
+
+    // POST-CONDITIONS:
     //
-    // - If `object_size <= MAX_OBJECT_SIZE`, then the returned `Span` has size
-    //   at least `object_size`.
+    // If this method is successful, then a new chunk has been allocated and
+    //
+    // - the chunk has been pushed onto the arena's stack,
+    // - the chunk is aligned to at least `MIN_CHUNK_ALIGN`, and
+    // - the chunk can accommodate a slot with layout `object_layout`.
 
     let total_allocated = self.total_allocated;
 
-    let target_0 = object_size + size_of::<Tail>();
-    let target_1 = total_allocated / 4 + 1;
-    let target = max(target_0, target_1);
+    let object_size = object_layout.size();
+    let object_align = object_layout.align();
 
-    let size =
-      if target <= MIN_CHUNK_SIZE {
-        MIN_CHUNK_SIZE
-      } else if target > MAX_CHUNK_SIZE {
-        MAX_CHUNK_SIZE
-      } else {
-        1 << (usize::BITS - (target - 1).leading_zeros())
-      };
+    // The chunk size we'd like to allocate, if the object will fit in it.
+    //
+    // It is always a power of two `<= 0b0100...`.
+
+    let size_0 = total_allocated / 4 + 1;
+    let size_0 = 1 << (usize::BITS - (size_0 - 1).leading_zeros());
+    let size_0 = max(size_0, MIN_CHUNK_SIZE);
+
+    // The size of any `Layout` is guaranteed to be `<= isize::MAX`. It follows
+    // that `size_1` does not overflow `usize`.
+
+    let size_1 = align_up(object_size, align_of::<Tail>()) + size_of::<Tail>();
+
+    // Note that `size_0` and `size_1` are both guaranteed to be a multiple of
+    // `align_of::<Tail>()`, so we can always place the tail at the end of the
+    // chunk.
+
+    let size = max(size_0, size_1);
+    let align = max(object_align, MIN_CHUNK_ALIGN);
+
+    // We can construct a valid `Layout` if and only if `size` rounded up to
+    // `align` does not overflow and is `<= isize::MAX`.
+
+    if size > isize::MAX as usize - (align - 1) {
+      return Err(E::from(InternalError::LayoutError));
+    }
 
     // SAFETY:
     //
-    // - `CHUNK_ALIGN != 0`
-    // - `CHUNK_ALIGN` is a power of two
-    // - `size` rounded up to a multiple of `CHUNK_ALIGN` is `<= isize::MAX`
+    // - `align != 0`
+    // - `align` is a power of two
+    // - `size` rounded up to a multiple of `align` is `<= isize::MAX`
 
-    let layout = unsafe { Layout::from_size_align_unchecked(size, CHUNK_ALIGN) };
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     // SAFETY:
     //
@@ -283,13 +275,20 @@ impl Arena {
 
     let lo = unsafe { alloc::alloc::alloc(layout) };
 
-    if lo.is_null() { return Err(E::from_global_alloc_error(layout)); }
+    if lo.is_null() {
+      return Err(E::from(InternalError::GlobalAllocError(layout)));
+    }
 
     let hi = lo.wrapping_add(size).wrapping_sub(size_of::<Tail>()) as *mut Tail;
 
+    // SAFETY:
+    //
+    // - `hi` is valid and aligned for writing a `Tail`.
+
     unsafe { hi.write(Tail(self.lo, self.hi)) };
 
-    // We're past possible error conditions, so actually update `self`.
+    // We're past possible error conditions, so we should actually update
+    // `self`.
 
     self.lo = lo;
     self.hi = hi;
@@ -308,25 +307,26 @@ impl Drop for Arena {
 impl<'a> Allocator<'a> {
   #[inline(always)]
   fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, E>
-    where E: InternalError
+    where E: From<InternalError>
   {
-    let align = align_of::<T>();
     let size = size_of::<T>();
+    let align = align_of::<T>();
 
     if /* const */ needs_drop::<T>() {
-      return Err(E::from_type_needs_drop());
+      return Err(E::from(InternalError::TypeNeedsDrop));
     }
 
     if /* const */ align > MAX_OBJECT_ALIGN {
-      return Err(E::from_type_align_too_large(align));
+      return Err(E::from(InternalError::TypeAlignTooLarge(align)));
     }
 
     if /* const */ size > MAX_OBJECT_SIZE {
-      return Err(E::from_type_size_too_large(size));
+      return Err(E::from(InternalError::TypeSizeTooLarge(size)));
     }
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Span(lo, hi) = self.arena.alloc_chunk_for(size)?;
+      let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+      let Span(lo, hi) = self.arena.alloc_chunk_for(layout)?;
       self.lo = lo;
       self.hi = hi;
     }
@@ -348,28 +348,30 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   fn internal_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [MaybeUninit<T>]>, E>
-    where E: InternalError
+    where E: From<InternalError>
   {
-    let align = align_of::<T>();
     let size_of_element = size_of::<T>();
-    let max_len = MAX_OBJECT_SIZE / size_of_element;
+    let align = align_of::<T>();
+
+    let max_len = isize::MAX as usize / size_of_element;
 
     if /* const */ needs_drop::<T>() {
-      return Err(E::from_type_needs_drop());
+      return Err(E::from(InternalError::TypeNeedsDrop));
     }
 
     if /* const */ align > MAX_OBJECT_ALIGN {
-      return Err(E::from_type_align_too_large(align));
+      return Err(E::from(InternalError::TypeAlignTooLarge(align)));
     }
 
     if len > max_len {
-      return Err(E::from_slice_too_long(len));
+      return Err(E::from(InternalError::SliceTooLong(len)));
     }
 
     let size = size_of_element * len;
 
     if size > ptr_byte_diff(self.hi, self.lo) {
-      let Span(lo, hi) = self.arena.alloc_chunk_for(size)?;
+      let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+      let Span(lo, hi) = self.arena.alloc_chunk_for(layout)?;
       self.lo = lo;
       self.hi = hi;
     }
