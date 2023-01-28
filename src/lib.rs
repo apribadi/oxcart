@@ -241,10 +241,6 @@ impl Arena {
 
     let size_1 = align_up(object_size, align_of::<Tail>()) + size_of::<Tail>();
 
-    // Both `size_0` and `size_1`, and therefore `size`, are guaranteed to be a
-    // multiple of `align_of::<Tail>()`, so we can always place the tail at the
-    // very end of the chunk.
-
     let size = max(size_0, size_1);
     let align = max(object_align, MIN_CHUNK_ALIGN);
 
@@ -272,6 +268,11 @@ impl Arena {
     if lo.is_null() {
       return Err(E::from(InternalError::GlobalAllocError(layout)));
     }
+
+    // The earlier computations of `size` and `align` guarantee both that the
+    // chunk is aligned to at least `align_of::<Tail>()` and that the size is a
+    // multiple of `align_of::<Tail>(), so we can place the tail at the very
+    // end of the chunk.
 
     let hi = lo.wrapping_add(size).wrapping_sub(size_of::<Tail>()) as *mut Tail;
 
@@ -311,15 +312,20 @@ impl<'a> Allocator<'a> {
       return Err(E::from(InternalError::TypeNeedsDrop));
     }
 
-    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
+    // TODO: find a more efficient sequence for the slow arbitrary alignment
+    // case.
+
+    if
+      size > ptr_addr(self.hi) - ptr_addr(self.lo) || (
+        align > MIN_CHUNK_ALIGN && (
+          self.lo > ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1))))
+    {
       let Span(lo, hi) = self.arena.alloc_chunk_for::<E>(layout)?;
       self.lo = lo;
       self.hi = hi;
     }
 
     let hi = ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1));
-
-    // TODO: handle large alignments.
 
     // SAFETY:
     //
