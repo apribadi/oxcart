@@ -26,7 +26,7 @@ enum KeyedList<K> {
 #[allow(dead_code)]
 struct KeyedNode<K, A> {
   car: A,
-  cdr: K,
+  cdr: KeyedList<K>,
 }
 
 fn warmup() {
@@ -51,90 +51,110 @@ fn run_bench<F>(name: &str, f: F) where F: Fn(usize, usize) -> () {
 
 #[inline(never)]
 fn bench_oxcart<'a>(count_0: usize, count_1: usize) {
-  let mut arena = oxcart::Arena::new();
-  for _ in 0 .. count_0 {
-    let mut allocator = arena.allocator();
+  #[inline(never)]
+  fn go<'a>(allocator: &mut oxcart::Allocator<'a>, count_1: usize) -> List<'a, u64> {
     let mut r = List::Nil;
     for i in 0 .. count_1 {
       r = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: r }));
     }
-    let _: List<_> = hint::black_box(r);
+    r
+  }
+  let mut arena = oxcart::Arena::new();
+  for _ in 0 .. count_0 {
+    let mut allocator = arena.allocator();
+    let _: List<_> = hint::black_box(go(&mut allocator, count_1));
     arena.reset();
   }
 }
 
 #[inline(never)]
 fn bench_bumpalo<'a>(count_0: usize, count_1: usize) {
-  let mut arena = bumpalo::Bump::new();
-  for _ in 0 .. count_0 {
+  #[inline(never)]
+  fn go(arena: &bumpalo::Bump, count_1: usize) -> List<'_, u64> {
     let mut r = List::Nil;
     for i in 0 .. count_1 {
       r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
     }
-    let _: List<_> = hint::black_box(r);
+    r
+  }
+  let mut arena = bumpalo::Bump::new();
+  for _ in 0 .. count_0 {
+    let _: List<_> = hint::black_box(go(&arena, count_1));
     arena.reset();
   }
 }
 
 #[inline(never)]
-fn bench_toolshed<'a>(count_0: usize, count_1: usize) {
-  for _ in 0 .. count_0 {
-    let arena = toolshed::Arena::new();
+fn bench_typed_arena<'a>(count_0: usize, count_1: usize) {
+  #[inline(never)]
+  fn go<'a>(arena: &'a typed_arena::Arena<Node<'a, u64>>, count_1: usize) -> List<'a, u64> {
     let mut r = List::Nil;
     for i in 0 .. count_1 {
       r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
     }
-    let _: List<_> = hint::black_box(r);
+    r
   }
-}
-
-#[inline(never)]
-fn bench_typed_arena<'a>(count_0: usize, count_1: usize) {
   for _ in 0 .. count_0 {
     let arena = typed_arena::Arena::new();
-    let mut r = List::Nil;
-    for i in 0 .. count_1 {
-      r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
-    }
-    let _: List<_> = hint::black_box(r);
+    let _: List<_> = hint::black_box(go(&arena, count_1));
   }
 }
 
 #[inline(never)]
 fn bench_copy_arena<'a>(count_0: usize, count_1: usize) {
-  for _ in 0 .. count_0 {
-    let mut arena = copy_arena::Arena::new();
-    let mut allocator = arena.allocator();
+  #[inline(never)]
+  fn go<'a>(allocator: &'a mut copy_arena::Allocator<'a>, count_1: usize) -> List<'a, u64> {
     let mut r = List::Nil;
     for i in 0 .. count_1 {
       r = List::Cons(allocator.alloc(Node { car: i as u64, cdr: r }));
     }
-    let _: List<_> = hint::black_box(r);
+    r
+  }
+  for _ in 0 .. count_0 {
+    let mut arena = copy_arena::Arena::new();
+    let mut allocator = arena.allocator();
+    let _: List<_> = hint::black_box(go(&mut allocator, count_1));
   }
 }
 
 #[inline(never)]
 fn bench_slotmap<'a>(count_0: usize, count_1: usize) {
-  let mut slotmap = slotmap::basic::SlotMap::new();
-  for _ in 0 .. count_0 {
+  #[inline(never)]
+  fn go(
+      slotmap: &mut slotmap::basic::SlotMap<slotmap::DefaultKey, KeyedNode<slotmap::DefaultKey, u64>>,
+      count_1: usize
+    ) -> KeyedList<slotmap::DefaultKey>
+  {
     let mut r = KeyedList::Nil;
     for i in 0 .. count_1 {
       r = KeyedList::Cons(slotmap.insert(KeyedNode { car: i as u64, cdr: r }));
     }
-    let _: KeyedList<_> = hint::black_box(r);
+    r
+  }
+  let mut slotmap = slotmap::basic::SlotMap::new();
+  for _ in 0 .. count_0 {
+    let _: KeyedList<_> = hint::black_box(go(&mut slotmap, count_1));
     slotmap.clear();
   }
 }
 
 #[inline(never)]
 fn bench_generational_arena<'a>(count_0: usize, count_1: usize) {
-  let mut arena = generational_arena::Arena::new();
-  for _ in 0 .. count_0 {
+  #[inline(never)]
+  fn go(
+      arena: &mut generational_arena::Arena<KeyedNode<generational_arena::Index, u64>>,
+      count_1: usize
+    ) -> KeyedList<generational_arena::Index>
+  {
     let mut r = KeyedList::Nil;
     for i in 0 .. count_1 {
       r = KeyedList::Cons(arena.insert(KeyedNode { car: i as u64, cdr: r }));
     }
-    let _: KeyedList<_> = hint::black_box(r);
+    r
+  }
+  let mut arena = generational_arena::Arena::new();
+  for _ in 0 .. count_0 {
+    let _: KeyedList<_> = hint::black_box(go(&mut arena, count_1));
     arena.clear();
   }
 }
@@ -144,7 +164,6 @@ fn main() {
 
   run_bench("oxcart", bench_oxcart);
   run_bench("bumpalo", bench_bumpalo);
-  run_bench("toolshed", bench_toolshed);
   run_bench("typed-arena", bench_typed_arena);
   run_bench("copy_arena", bench_copy_arena);
   run_bench("slotmap", bench_slotmap);

@@ -30,6 +30,7 @@ use core::mem::MaybeUninit;
 use core::mem::align_of;
 use core::mem::needs_drop;
 use core::mem::size_of;
+use core::ptr::NonNull;
 use core::ptr::null_mut;
 use core::slice;
 
@@ -89,7 +90,6 @@ enum InternalError {
   GlobalAllocError(Layout),
   LayoutError,
   SliceTooLong(usize),
-  TypeAlignTooLarge(usize),
   TypeNeedsDrop,
 }
 
@@ -161,7 +161,6 @@ impl FromInternalError for Panicked {
       InternalError::GlobalAllocError(layout) => alloc::alloc::handle_alloc_error(layout),
       InternalError::LayoutError => panic!("layout error"),
       InternalError::SliceTooLong(len) => panic!("slice too long: {len:?}"),
-      InternalError::TypeAlignTooLarge(align) => panic!("type align too large: {align:?}"),
       InternalError::TypeNeedsDrop => panic!("type needs drop"),
     }
   }
@@ -246,6 +245,9 @@ impl Arena {
 
     // We can construct a valid `Layout` if and only if `size` rounded up to
     // `align` does not overflow and is `<= isize::MAX`.
+    //
+    // Note that a very large `object_size` is necessary for this to occur; the
+    // exponential chunk growth alone will not cause this to overflow.
 
     if size > isize::MAX as usize - (align - 1) {
       return Err(E::from(InternalError::LayoutError));
@@ -301,31 +303,40 @@ impl Drop for Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, E>
+  fn internal_alloc_layout<E>(&mut self, layout: Layout) -> Result<NonNull<u8>, E>
     where E: FromInternalError
   {
-    let layout = Layout::new::<T>();
     let size = layout.size();
     let align = layout.align();
 
-    if /* const */ needs_drop::<T>() {
-      return Err(E::from(InternalError::TypeNeedsDrop));
-    }
+    self.lo = ptr_mask_mut(self.lo.wrapping_add(align - 1), ! (align - 1));
 
-    // TODO: find a more efficient sequence for the slow arbitrary alignment
-    // case.
-
-    if
-      size > ptr_addr(self.hi) - ptr_addr(self.lo) || (
-        align > MIN_CHUNK_ALIGN && (
-          self.lo > ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1))))
-    {
+    if size as isize > ptr_addr(self.hi).wrapping_sub(ptr_addr(self.lo)) as isize {
       let Span(lo, hi) = self.arena.alloc_chunk_for::<E>(layout)?;
       self.lo = lo;
       self.hi = hi;
     }
 
-    let hi = ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1));
+    let slot = self.lo;
+
+    self.lo = self.lo.wrapping_add(size);
+
+    // SAFETY:
+    //
+    // - ???
+
+    Ok(unsafe { NonNull::new_unchecked(slot) })
+  }
+
+  #[inline(always)]
+  fn internal_alloc<T, E>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, E>
+    where E: FromInternalError
+  {
+    if /* const */ needs_drop::<T>() {
+      return Err(E::from(InternalError::TypeNeedsDrop));
+    }
+
+    let slot = self.internal_alloc_layout::<E>(Layout::new::<T>())?;
 
     // SAFETY:
     //
@@ -333,9 +344,7 @@ impl<'a> Allocator<'a> {
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    let slot: &'a mut MaybeUninit<T> = unsafe { &mut *hi.cast() };
-
-    self.hi = hi;
+    let slot: &'a mut MaybeUninit<T> = unsafe { slot.cast().as_mut() };
 
     Ok(Slot(slot))
   }
@@ -346,15 +355,10 @@ impl<'a> Allocator<'a> {
   {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
-
     let max_len = isize::MAX as usize / size_of_element;
 
     if /* const */ needs_drop::<T>() {
       return Err(E::from(InternalError::TypeNeedsDrop));
-    }
-
-    if /* const */ align > MAX_OBJECT_ALIGN {
-      return Err(E::from(InternalError::TypeAlignTooLarge(align)));
     }
 
     if len > max_len {
@@ -362,15 +366,8 @@ impl<'a> Allocator<'a> {
     }
 
     let size = size_of_element * len;
-
-    if size > ptr_addr(self.hi) - ptr_addr(self.lo) {
-      let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-      let Span(lo, hi) = self.arena.alloc_chunk_for::<E>(layout)?;
-      self.lo = lo;
-      self.hi = hi;
-    }
-
-    let hi = ptr_mask_mut(self.hi.wrapping_sub(size), ! (align - 1));
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+    let slot = self.internal_alloc_layout::<E>(layout)?;
 
     // SAFETY:
     //
@@ -378,9 +375,7 @@ impl<'a> Allocator<'a> {
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    let slot: &'a mut [MaybeUninit<T>] = unsafe { slice::from_raw_parts_mut(hi.cast(), len) };
-
-    self.hi = hi;
+    let slot: &'a mut [MaybeUninit<T>] = unsafe { slice::from_raw_parts_mut(slot.cast().as_ptr(), len) };
 
     Ok(Slot(slot))
   }
@@ -405,6 +400,16 @@ impl<'a> Allocator<'a> {
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, MaybeUninit<T>>, AllocError> {
     self.internal_alloc()
+  }
+
+  #[inline(always)]
+  pub fn alloc_layout(&mut self, layout: Layout) -> NonNull<u8> {
+    unwrap(self.internal_alloc_layout(layout))
+  }
+
+  #[inline(always)]
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+    self.internal_alloc_layout(layout)
   }
 
   /// Allocates a slot for a slice of the given length.
