@@ -61,9 +61,9 @@ fn bench_oxcart<'a>(count_0: usize, count_1: usize) {
   }
   let mut arena = oxcart::Arena::new();
   for _ in 0 .. count_0 {
-    let mut allocator = arena.allocator();
-    let _: List<_> = hint::black_box(go(&mut allocator, count_1));
-    arena.reset();
+    arena.region(|allocator| {
+      let _: List<_> = hint::black_box(go(allocator, count_1));
+    })
   }
 }
 
@@ -74,6 +74,7 @@ fn bench_bumpalo<'a>(count_0: usize, count_1: usize) {
     let mut r = List::Nil;
     for i in 0 .. count_1 {
       r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
+      // arena.alloc_layout(core::alloc::Layout::new::<Node<u64>>());
     }
     r
   }
