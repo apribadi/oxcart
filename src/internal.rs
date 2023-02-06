@@ -46,7 +46,6 @@ impl AlignUp for *mut u8 {
   }
 }
 
-#[inline(never)]
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
   //
@@ -71,6 +70,7 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 }
 
 #[inline(never)]
+#[cold]
 unsafe fn alloc_chunk_for<E: FromError>
   (
     object: Layout,

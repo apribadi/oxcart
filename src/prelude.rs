@@ -1,12 +1,12 @@
-pub extern crate alloc;
-
-pub use core::alloc::Layout;
-pub use core::cmp::max;
-pub use core::marker::PhantomData;
-pub use core::mem::MaybeUninit;
-pub use core::mem::align_of;
-pub use core::mem::needs_drop;
-pub use core::mem::size_of;
-pub use core::ptr::NonNull;
-pub use core::ptr::null_mut;
-pub use core::slice;
+pub(crate) extern crate alloc;
+pub(crate) use core::alloc::Layout;
+pub(crate) use core::cmp::max;
+pub(crate) use core::convert::Infallible;
+pub(crate) use core::marker::PhantomData;
+pub(crate) use core::mem::MaybeUninit;
+pub(crate) use core::mem::align_of;
+pub(crate) use core::mem::needs_drop;
+pub(crate) use core::mem::size_of;
+pub(crate) use core::ptr::NonNull;
+pub(crate) use core::ptr::null_mut;
+pub(crate) use core::slice;

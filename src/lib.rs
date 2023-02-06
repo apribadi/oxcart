@@ -14,6 +14,7 @@
 #![warn(unused_qualifications)]
 
 mod prelude;
+
 mod internal;
 
 use crate::prelude::*;
@@ -28,8 +29,6 @@ pub struct UninitSlice<'a, T: 'a>(pub &'a mut [MaybeUninit<T>]);
 
 #[derive(Clone, Debug)]
 pub struct AllocError;
-
-enum Panicked {}
 
 // SAFETY:
 //
@@ -51,15 +50,25 @@ impl internal::FromError for AllocError {
   }
 }
 
-impl internal::FromError for Panicked {
+impl internal::FromError for Infallible {
   #[inline(never)]
-  fn from_error(_: internal::Error) -> Self {
-    panic!()
+  #[cold]
+  fn from_error(e: internal::Error) -> Self {
+    match e {
+      internal::Error::GlobalAllocError(layout) =>
+        alloc::alloc::handle_alloc_error(layout),
+      internal::Error::LayoutOverflow =>
+        panic!("layout overflow"),
+      internal::Error::SliceTooLong(len) =>
+        panic!("slice too long: {len}"),
+      internal::Error::TypeNeedsDrop =>
+        panic!("type needs drop"),
+    }
   }
 }
 
 #[inline(always)]
-fn ok_or_panicked<T>(x: Result<T, Panicked>) -> T {
+fn unwrap<T>(x: Result<T, Infallible>) -> T {
   match x {
     Ok(x) => x,
     Err(e) => match e {}
@@ -73,6 +82,8 @@ impl Arena {
   pub fn new() -> Self {
     Self(Allocator(internal::Arena::new(), PhantomData))
   }
+
+  /// TODO
 
   #[inline(always)]
   pub fn region<F, T>(&mut self, f: F) -> T
@@ -162,7 +173,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Uninit<'a, T> {
-    ok_or_panicked(self.gen_alloc())
+    unwrap(self.gen_alloc())
   }
 
   /// Allocates memory for a single object.
@@ -187,7 +198,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> UninitSlice<'a, T> {
-    ok_or_panicked(self.gen_alloc_slice(len))
+    unwrap(self.gen_alloc_slice(len))
   }
 
   /// Allocates memory for a slice of the given length.
@@ -210,7 +221,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
-    ok_or_panicked(self.gen_alloc_layout(layout))
+    unwrap(self.gen_alloc_layout(layout))
   }
 
   /// Allocates memory for the given layout.
