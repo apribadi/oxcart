@@ -10,7 +10,7 @@ pub(crate) use core::mem::size_of;
 pub(crate) use core::ptr::NonNull;
 pub(crate) use core::slice;
 
-// feature strict_provenance - `core::ptr::invalid_mut`
+// feature strict_provenance - `core::ptr`
 
 #[inline(always)]
 pub(crate) fn invalid_mut<T>(addr: usize) -> *mut T {
@@ -28,5 +28,18 @@ pub(crate) fn addr<T>(p: *const T) -> usize {
 
 #[inline(always)]
 pub(crate) fn mask<T>(p: *mut T, mask: usize) -> *mut T {
-  (p as *mut u8).wrapping_sub(addr(p) & ! mask) as *mut T
+  let p = p as *mut u8;
+  let p = p.wrapping_sub(addr(p) & ! mask);
+  let p = p as *mut T;
+  p
+}
+
+// feature slice_assume_init_mut - `core::mem::MaybeUninit`
+
+#[inline(always)]
+pub(crate) unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
+  let p: *mut [MaybeUninit<T>] = p;
+  let p: *mut [T] = p as *mut [T];
+  let p: &mut [T] = unsafe { &mut *p };
+  p
 }

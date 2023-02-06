@@ -27,24 +27,6 @@ pub(crate) trait FromError {
   fn from_error(_: Error) -> Self;
 }
 
-trait AlignUp {
-  fn align_up(self, align: usize) -> Self;
-}
-
-impl AlignUp for usize {
-  #[inline(always)]
-  fn align_up(self, align: usize) -> Self {
-    self.wrapping_add(align - 1) & ! (align - 1)
-  }
-}
-
-impl AlignUp for *mut u8 {
-  #[inline(always)]
-  fn align_up(self, align: usize) -> Self {
-    mask(self.wrapping_add(align - 1), ! (align - 1))
-  }
-}
-
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
   //
@@ -110,7 +92,8 @@ unsafe fn alloc_chunk_for<E: FromError>
   // The size of any `Layout` is guaranteed to be `<= isize::MAX`. It follows
   // that `size_1` does not overflow `usize`.
 
-  let size_1 = object_size.align_up(FOOTER_ALIGN) + FOOTER_SIZE;
+  let size_1 = object_size.wrapping_add(FOOTER_ALIGN - 1) & ! (FOOTER_ALIGN - 1);
+  let size_1 = size_1 + FOOTER_SIZE;
 
   let size = max(size_0, size_1);
   let align = max(object_align, MIN_CHUNK_ALIGN);
@@ -196,7 +179,7 @@ impl Arena {
     let size = layout.size();
     let align = layout.align();
 
-    let lo = self.lo.align_up(align);
+    let lo = mask(self.lo.wrapping_add(align - 1), ! (align - 1));
 
     if size as isize > addr(self.hi).wrapping_sub(addr(lo)) as isize {
       let (lo, hi) = unsafe { alloc_chunk_for::<E>(layout, self.hi) }?;

@@ -255,13 +255,10 @@ impl<'a, T> UninitSlice<'a, T> {
       a.write(f(i));
     }
 
-    let p: *mut [MaybeUninit<T>] = self.0;
-    let p: *mut [T] = p as *mut [T];
-
     // SAFETY:
     //
     // - Every slice element has been initialized.
 
-    unsafe { &mut *p }
+    unsafe { slice_assume_init_mut(self.0) }
   }
 }
