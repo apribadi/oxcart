@@ -209,3 +209,11 @@ impl Arena {
     Ok(p)
   }
 }
+
+impl Drop for Arena {
+  fn drop(&mut self) {
+    if let Some(p) = NonNull::new(self.hi) {
+      unsafe { dealloc_chunk_list(p) }
+    }
+  }
+}

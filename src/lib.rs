@@ -89,15 +89,8 @@ impl Arena {
   pub fn region<F, T>(&mut self, f: F) -> T
     where F: for<'a, 'b> FnOnce(&'a mut Allocator<'b>) -> T
   {
-    let p: &'_ mut Allocator<'static> = &mut self.0;
-    let p: *mut Allocator<'static> = p;
-    let p: *mut Allocator<'_> = p.cast();
-    let p: &'_ mut Allocator<'_> = unsafe { &mut *p };
-
-    let t = f(p);
-
+    let t = f(&mut self.0);
     self.0.0.reset();
-
     t
   }
 }
