@@ -61,9 +61,9 @@ fn bench_oxcart<'a>(count_0: usize, count_1: usize) {
   }
   let mut arena = oxcart::Arena::new();
   for _ in 0 .. count_0 {
-    arena.region(|allocator| {
-      let _: List<_> = hint::black_box(go(allocator, count_1));
-    })
+    let allocator = arena.allocator();
+    let _: List<_> = hint::black_box(go(allocator, count_1));
+    arena.reset();
   }
 }
 

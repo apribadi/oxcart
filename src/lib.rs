@@ -13,9 +13,9 @@
 #![warn(unused_lifetimes)]
 #![warn(unused_qualifications)]
 
-mod prelude;
-
 mod internal;
+
+mod prelude;
 
 use crate::prelude::*;
 
@@ -83,15 +83,18 @@ impl Arena {
     Self(Allocator(internal::Arena::new(), PhantomData))
   }
 
-  /// TODO
+  #[inline(always)]
+  pub fn allocator(&mut self) -> &mut Allocator<'_> {
+    let p: &mut Allocator<'static> = &mut self.0;
+    let p: *mut Allocator<'static> = p;
+    let p: *mut Allocator<'_> = p.cast();
+    let p: &mut Allocator<'_> = unsafe { &mut *p };
+    p
+  }
 
   #[inline(always)]
-  pub fn region<F, T>(&mut self, f: F) -> T
-    where F: for<'a, 'b> FnOnce(&'a mut Allocator<'b>) -> T
-  {
-    let t = f(&mut self.0);
-    self.0.0.reset();
-    t
+  pub fn reset(&mut self) {
+    self.0.0.reset()
   }
 }
 

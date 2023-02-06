@@ -4,24 +4,25 @@ pub use oxcart::Arena;
 #[test]
 fn test_arena() {
   let mut arena = Arena::new();
+  let allocator = arena.allocator();
 
-  arena.region(|allocator| {
-    let x = allocator.alloc().init(0);
-    let y = allocator.alloc().init(0);
-    let z = allocator.alloc().init(0);
+  let x = allocator.alloc().init(0);
+  let y = allocator.alloc().init(0);
+  let z = allocator.alloc().init(0);
 
-    *x = 1;
-    *y = 2;
-    *z = 3;
+  *x = 1;
+  *y = 2;
+  *z = 3;
 
-    assert!(*x + *y + *z == 6);
-  });
+  assert!(*x + *y + *z == 6);
 
-  arena.region(|allocator| {
-    let x = allocator.alloc_slice(3).init(|i| (i as u64) + 1);
+  arena.reset();
 
-    assert!(x[0] + x[1] + x[2] == 6);
-  });
+  let allocator = arena.allocator();
+
+  let x = allocator.alloc_slice(3).init(|i| (i as u64) + 1);
+
+  assert!(x[0] + x[1] + x[2] == 6);
 }
 
 #[test]
@@ -32,13 +33,13 @@ fn test_send_sync() {
 
   send_sync::<Arena>(&arena);
 
-  arena.region(|allocator| {
-    let x = allocator.alloc::<i64>();
-    let y = allocator.alloc_slice::<i64>(2);
-    send_sync::<oxcart::Allocator>(&allocator);
-    send_sync::<oxcart::Uninit<_>>(&x);
-    send_sync::<oxcart::UninitSlice<_>>(&y);
-  })
+  let allocator = arena.allocator();
+  let x = allocator.alloc::<i64>();
+  let y = allocator.alloc_slice::<i64>(2);
+
+  send_sync::<oxcart::Allocator>(allocator);
+  send_sync::<oxcart::Uninit<_>>(&x);
+  send_sync::<oxcart::UninitSlice<_>>(&y);
 }
 
 #[test]
@@ -55,11 +56,10 @@ fn test_list() {
   }
 
   let mut arena = Arena::new();
+  let allocator = arena.allocator();
 
-  arena.region(|allocator| {
-    let mut x = List::Nil;
-    for i in 0 .. 100 {
-      x = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: x }));
-    }
-  });
+  let mut x = List::Nil;
+  for i in 0 .. 100 {
+    x = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: x }));
+  }
 }

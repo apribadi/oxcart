@@ -41,8 +41,7 @@ impl AlignUp for usize {
 impl AlignUp for *mut u8 {
   #[inline(always)]
   fn align_up(self, align: usize) -> Self {
-    let p = self.wrapping_add(align - 1);
-    p.wrapping_sub((p as usize) & (align - 1))
+    mask(self.wrapping_add(align - 1), ! (align - 1))
   }
 }
 
@@ -165,9 +164,14 @@ unsafe fn alloc_chunk_for<E: FromError>
 impl Arena {
   #[inline(always)]
   pub(crate) fn new() -> Self {
+    // NB:
+    //
+    // - `lo > hi` so there is no space for ZSTs.
+    // - `hi - align_up(lo, MAX_ALIGN) == isize::MIN`.
+
     Self {
-      lo: null_mut(),
-      hi: null_mut(),
+      lo: invalid_mut(1),
+      hi: invalid_mut(0),
     }
   }
 
@@ -181,7 +185,7 @@ impl Arena {
       self.lo = (hi as *mut u8).wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
 
       if let Some(next) = NonNull::new(f.next) {
-        f.next = null_mut();
+        f.next = invalid_mut(0);
         unsafe { dealloc_chunk_list(next) }
       }
     }
@@ -194,7 +198,7 @@ impl Arena {
 
     let lo = self.lo.align_up(align);
 
-    if size as isize > (self.hi as usize).wrapping_sub(lo as usize) as isize {
+    if size as isize > addr(self.hi).wrapping_sub(addr(lo)) as isize {
       let (lo, hi) = unsafe { alloc_chunk_for::<E>(layout, self.hi) }?;
       self.lo = lo;
       self.hi = hi;
