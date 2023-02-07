@@ -43,3 +43,11 @@ pub(crate) unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut 
   let p: &mut [T] = unsafe { &mut *p };
   p
 }
+
+#[inline(always)]
+pub(crate) fn unwrap<T>(x: Result<T, Infallible>) -> T {
+  match x {
+    Ok(x) => x,
+    Err(e) => match e {}
+  }
+}

@@ -16,15 +16,11 @@ struct Footer {
   total_allocated: usize,
 }
 
-pub(crate) enum Error {
-  GlobalAllocError(Layout),
-  LayoutOverflow,
-  SliceTooLong(usize),
-  TypeNeedsDrop,
-}
-
-pub(crate) trait FromError {
-  fn from_error(_: Error) -> Self;
+pub(crate) trait Error {
+  fn global_alloc_error(_: Layout) -> Self;
+  fn layout_overflow() -> Self;
+  fn slice_too_long(_: usize) -> Self;
+  fn type_needs_drop() -> Self;
 }
 
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
@@ -52,7 +48,7 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_chunk_for<E: FromError>
+unsafe fn alloc_chunk_for<E: Error>
   (
     object: Layout,
     chunks: *mut Footer
@@ -105,7 +101,7 @@ unsafe fn alloc_chunk_for<E: FromError>
   // exponential chunk growth alone will not cause this to overflow.
 
   if size > isize::MAX as usize - (align - 1) {
-    return Err(E::from_error(Error::LayoutOverflow));
+    return Err(E::layout_overflow());
   }
 
   // SAFETY:
@@ -123,7 +119,7 @@ unsafe fn alloc_chunk_for<E: FromError>
   let lo = unsafe { alloc::alloc::alloc(layout) };
 
   if lo.is_null() {
-    return Err(E::from_error(Error::GlobalAllocError(layout)));
+    return Err(E::global_alloc_error(layout));
   }
 
   // We have made sure that the chunk is aligned to at least
@@ -175,7 +171,7 @@ impl Arena {
   }
 
   #[inline(always)]
-  pub(crate) fn alloc<E: FromError>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
+  pub(crate) fn alloc<E: Error>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
     let size = layout.size();
     let align = layout.align();
 
