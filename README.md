@@ -4,7 +4,7 @@ a fast arena allocator
 
 ## Example
 
-```
+```rust
 let mut arena = oxcart::Arena::new();
 let allocator = arena.allocator();
 
