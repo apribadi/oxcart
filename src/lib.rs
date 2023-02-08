@@ -3,6 +3,13 @@
 //! # Example
 //!
 //! ```
+//! let mut arena = oxcart::Arena::new();
+//! let allocator = arena.allocator();
+//! let x: &mut u64 = allocator.alloc().init(13);
+//! let y: &mut [u64] = allocator.alloc_slice(5).init(|i| i as u64);
+//! assert!(*x == 13);
+//! assert!(y == &[0, 1, 2, 3, 4]);
+//! arena.reset();
 //! ```
 
 #![no_std]
@@ -19,13 +26,23 @@ mod raw;
 
 use crate::prelude::*;
 
+/// An arena for fast allocation and all-at-once deallocation.
+
 pub struct Arena(Allocator<'static>);
+
+/// A handle for allocating objects from the arena with a particular lifetime.
 
 pub struct Allocator<'a>(raw::Arena, PhantomData<&'a ()>);
 
+/// An uninitialized object in the arena.
+
 pub struct Uninit<'a, T: 'a>(pub &'a mut MaybeUninit<T>);
 
+/// An uninitialized slice of objects in the arena.
+
 pub struct UninitSlice<'a, T: 'a>(pub &'a mut [MaybeUninit<T>]);
+
+/// A failed allocation from the arena.
 
 #[derive(Clone, Debug)]
 pub struct AllocError;
@@ -113,8 +130,9 @@ impl Arena {
     p
   }
 
-  /// Deallocates objects previously allocated from the arena. The arena may
-  /// release some, but not all, of its memory back to the global allocator.
+  /// Deallocates all objects previously allocated from the arena. The arena
+  /// may release some, but not necessarily all, of its memory back to the
+  /// global allocator.
 
   #[inline(always)]
   pub fn reset(&mut self) {

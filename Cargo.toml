@@ -1,7 +1,11 @@
 [package]
 name = "oxcart"
 version = "0.1.0"
+authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
+license = "Artistic-2.0"
 edition = "2021"
+categories = ["memory-management"]
+description = "a fast arena allocator"
 
 [dependencies]
 
