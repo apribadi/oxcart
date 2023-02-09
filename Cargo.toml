@@ -13,6 +13,10 @@ description = "a fast arena allocator"
 bumpalo = "3.12.0"
 copy_arena = "0.1.1"
 expect-test = "1.4.0"
+generational-arena = "0.2.8"
+slab = "0.4.7"
 slotmap = "1.0.6"
 typed-arena = "2.0.2"
-generational-arena = "0.2.8"
+
+[profile.release]
+opt-level = 1

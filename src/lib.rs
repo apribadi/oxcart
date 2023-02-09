@@ -5,10 +5,13 @@
 //! ```
 //! let mut arena = oxcart::Arena::new();
 //! let allocator = arena.allocator();
+//!
 //! let x: &mut u64 = allocator.alloc().init(13);
 //! let y: &mut [u64] = allocator.alloc_slice(5).init(|i| i as u64);
+//!
 //! assert!(*x == 13);
 //! assert!(y == &[0, 1, 2, 3, 4]);
+//!
 //! arena.reset();
 //! ```
 
@@ -26,7 +29,7 @@ mod raw;
 
 use crate::prelude::*;
 
-/// An arena for fast allocation and all-at-once deallocation.
+/// A fast arena allocator.
 
 pub struct Arena(Allocator<'static>);
 
@@ -157,14 +160,16 @@ impl<'a> Allocator<'a> {
     }
 
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
+    let p = p.cast().as_ptr();
 
     // SAFETY:
     //
+    // - The pointer is non-null and aligned, even if `size == 0`.
     // - The memory has the correct size and alignment.
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Ok(Uninit(unsafe { p.cast().as_mut() }))
+    Ok(Uninit(unsafe { &mut *p }))
   }
 
   #[inline(always)]
@@ -190,14 +195,16 @@ impl<'a> Allocator<'a> {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
+    let p = p.cast().as_ptr();
 
     // SAFETY:
     //
+    // - The pointer is non-null and aligned, even if `size == 0`.
     // - The memory has the correct size and alignment.
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Ok(UninitSlice(unsafe { slice::from_raw_parts_mut(p.cast().as_ptr(), len) }))
+    Ok(UninitSlice(unsafe { slice::from_raw_parts_mut(p, len) }))
   }
 
   #[inline(always)]
@@ -205,8 +212,60 @@ impl<'a> Allocator<'a> {
     where E: raw::Error
   {
     let p = self.0.alloc::<E>(layout)?;
+    let p = p.cast().as_ptr();
 
-    Ok(unsafe { slice::from_raw_parts_mut(p.cast().as_ptr(), layout.size()) })
+    Ok(unsafe { slice::from_raw_parts_mut(p, layout.size()) })
+  }
+
+  #[inline(always)]
+  fn gen_copy_slice<T: Copy, E>(&mut self, src: &[T]) -> Result<&'a mut [T], E>
+    where E: raw::Error
+  {
+    // NB:
+    //
+    // - `Copy` implies `!Drop`.
+    // - The existence of `src` implies that we'll construct a valid layout.
+
+    let size_of_element = size_of::<T>();
+    let align = align_of::<T>();
+    let len = src.len();
+    let size = size_of_element * len;
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+
+    let p = self.0.alloc::<E>(layout)?;
+    let p = p.cast().as_ptr();
+
+    // SAFETY:
+    //
+    // - The `src` argument is valid for reading `T`s.
+    // - The `dst` argument is valid for writing `T`s.
+    // - The `src` and `dst` regions do not overlap.
+    //
+    // Note that the above holds, and in particular the pointers are non-null
+    // and aligned, even if we need to do zero-byte reads and writes.
+
+    unsafe { copy_nonoverlapping(src.as_ptr(), p, len) };
+
+    // SAFETY:
+    //
+    // - The pointer is non-null and aligned, even if `size == 0`.
+    // - The memory has the correct size and alignment.
+    // - The memory is not aliased by any other reference.
+    // - The memory is live for the duration of the assigned lifetime.
+    // - The memory is initialized.
+
+    Ok(unsafe { slice::from_raw_parts_mut(p, len) })
+  }
+
+  #[inline(always)]
+  fn gen_copy_str<E>(&mut self, src: &str) -> Result<&'a mut str, E>
+    where E: raw::Error
+  {
+    let a = self.gen_copy_slice(src.as_bytes())?;
+
+    // SAFETY: The byte array is valid UTF-8.
+
+    Ok(unsafe { str::from_utf8_unchecked_mut(a) })
   }
 
   /// Allocates memory for a single object.
@@ -280,6 +339,52 @@ impl<'a> Allocator<'a> {
   pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
     self.gen_alloc_layout(layout)
   }
+
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// - Appending metadata to the allocation would overflow [`Layout`].
+  /// - The global allocator failed to allocate memory.
+
+  #[inline(always)]
+  pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
+    unwrap(self.gen_copy_slice(src))
+  }
+
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// See panic conditions for [`copy_slice`](Self::copy_slice).
+
+  #[inline(always)]
+  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError> {
+    self.gen_copy_slice(src)
+  }
+
+  /// Copies the string into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// - Appending metadata to the allocation would overflow [`Layout`].
+  /// - The global allocator failed to allocate memory.
+
+  #[inline(always)]
+  pub fn copy_str(&mut self, src: &str) -> &'a mut str {
+    unwrap(self.gen_copy_str(src))
+  }
+
+  /// Copies the string into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// See panic conditions for [`copy_str`](Self::copy_str).
+
+  #[inline(always)]
+  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
+    self.gen_copy_str(src)
+  }
 }
 
 impl<'a, T> Uninit<'a, T> {
@@ -311,4 +416,8 @@ impl<'a, T> UninitSlice<'a, T> {
 
     unsafe { slice_assume_init_mut(self.0) }
   }
+}
+
+pub fn foo<'a>(allocator: &mut Allocator<'a>, s: &str) -> &'a mut str {
+  allocator.copy_str(s)
 }

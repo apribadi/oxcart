@@ -24,6 +24,11 @@ arena.reset();
 - sound
 - compatible with strict provenance
 
+## Non-Features
+
+- no `drop` calls on deallocation
+- no `allocator_api` integration
+
 ## License
  
 Artistic License 2.0

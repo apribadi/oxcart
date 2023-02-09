@@ -1,32 +1,24 @@
 use std::time::Instant;
 use std::hint;
 
-const COUNT_0: usize = 10_000;
-const COUNT_1: usize = 10_000;
+const ITERS: usize = 10_000;
+const LEN: usize = 10_000;
+
+type List<'a, T> = Option<&'a Node<'a, T>>;
 
 #[derive(Clone, Copy)]
-enum List<'a, A> {
-  Nil,
-  Cons(&'a Node<'a, A>),
+struct Node<'a, T> {
+  #[allow(dead_code)]
+  car: T,
+  #[allow(dead_code)]
+  cdr: Option<&'a Node<'a, T>>,
 }
 
-#[allow(dead_code)]
-#[derive(Clone, Copy)]
-struct Node<'a, A> {
-  car: A,
-  cdr: List<'a, A>
-}
-
-#[allow(dead_code)]
-enum KeyedList<K> {
-  Nil,
-  Cons(K),
-}
-
-#[allow(dead_code)]
-struct KeyedNode<K, A> {
-  car: A,
-  cdr: KeyedList<K>,
+struct NodeWithKey<K, T> {
+  #[allow(dead_code)]
+  car: T,
+  #[allow(dead_code)]
+  cdr: Option<K>,
 }
 
 fn warmup() {
@@ -35,128 +27,162 @@ fn warmup() {
   let _: u64 = hint::black_box(s);
 }
 
-fn timeit<A, F>(f: F) -> f64 where F: FnOnce() -> A {
+fn timeit<F: FnOnce()>(f: F) -> f64 {
   let start = Instant::now();
-  let _: A = hint::black_box(f());
+  f();
   let stop = Instant::now();
   stop.saturating_duration_since(start).as_nanos() as f64
 }
 
-fn run_bench<F>(name: &str, f: F) where F: Fn(usize, usize) -> () {
-  let count_0 = hint::black_box(COUNT_0);
-  let count_1 = hint::black_box(COUNT_1);
-  let elapsed = timeit(|| f(count_0, count_1));
-  print!("{:25} {:.3} ns\n", name, elapsed / ((count_0 * count_1) as f64));
+fn run_bench<F: FnOnce(usize, usize)>(name: &str, f: F) {
+  let duration = timeit(|| f(hint::black_box(ITERS), hint::black_box(LEN)));
+  let duration = duration / ((ITERS * LEN) as f64);
+  print!("{:25} {:.3} ns\n", name, duration);
 }
 
 #[inline(never)]
-fn bench_oxcart<'a>(count_0: usize, count_1: usize) {
+fn bench_oxcart(iters: usize, len: usize) {
   #[inline(never)]
-  fn go<'a>(allocator: &mut oxcart::Allocator<'a>, count_1: usize) -> List<'a, u64> {
-    let mut r = List::Nil;
-    for i in 0 .. count_1 {
-      r = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: r }));
+  fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in 0 .. len {
+      r = Some(allocator.alloc().init(Node { car: i as u64, cdr: r }));
     }
     r
   }
+
   let mut arena = oxcart::Arena::new();
-  for _ in 0 .. count_0 {
+
+  for _ in 0 .. iters {
     let allocator = arena.allocator();
-    let _: List<_> = hint::black_box(go(allocator, count_1));
+    let _: _ = hint::black_box(make_list(allocator, len));
     arena.reset();
   }
 }
 
 #[inline(never)]
-fn bench_bumpalo<'a>(count_0: usize, count_1: usize) {
+fn bench_bumpalo(iters: usize, len: usize) {
   #[inline(never)]
-  fn go(arena: &bumpalo::Bump, count_1: usize) -> List<'_, u64> {
-    let mut r = List::Nil;
-    for i in 0 .. count_1 {
-      r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
-      // arena.alloc_layout(core::alloc::Layout::new::<Node<u64>>());
+  fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in 0 .. len {
+      r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
+
   let mut arena = bumpalo::Bump::new();
-  for _ in 0 .. count_0 {
-    let _: List<_> = hint::black_box(go(&arena, count_1));
+
+  for _ in 0 .. iters {
+    let _: List<_> = hint::black_box(make_list(&arena, len));
     arena.reset();
   }
 }
 
 #[inline(never)]
-fn bench_typed_arena<'a>(count_0: usize, count_1: usize) {
+fn bench_typed_arena(iters: usize, len: usize) {
   #[inline(never)]
-  fn go<'a>(arena: &'a typed_arena::Arena<Node<'a, u64>>, count_1: usize) -> List<'a, u64> {
-    let mut r = List::Nil;
-    for i in 0 .. count_1 {
-      r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
+  fn make_list<'a>(arena: &'a typed_arena::Arena<Node<'a, u64>>, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in 0 .. len {
+      r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
-  for _ in 0 .. count_0 {
+
+  for _ in 0 .. iters {
     let arena = typed_arena::Arena::new();
-    let _: List<_> = hint::black_box(go(&arena, count_1));
+    let _: List<_> = hint::black_box(make_list(&arena, len));
   }
 }
 
 #[inline(never)]
-fn bench_copy_arena<'a>(count_0: usize, count_1: usize) {
+fn bench_copy_arena(iters: usize, len: usize) {
   #[inline(never)]
-  fn go<'a>(allocator: &'a mut copy_arena::Allocator<'a>, count_1: usize) -> List<'a, u64> {
-    let mut r = List::Nil;
-    for i in 0 .. count_1 {
-      r = List::Cons(allocator.alloc(Node { car: i as u64, cdr: r }));
+  fn make_list<'a>(allocator: &'a mut copy_arena::Allocator<'a>, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in 0 .. len {
+      r = Some(allocator.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
-  for _ in 0 .. count_0 {
+
+  for _ in 0 .. iters {
     let mut arena = copy_arena::Arena::new();
     let mut allocator = arena.allocator();
-    let _: List<_> = hint::black_box(go(&mut allocator, count_1));
+    let _: List<_> = hint::black_box(make_list(&mut allocator, len));
   }
 }
 
 #[inline(never)]
-fn bench_slotmap<'a>(count_0: usize, count_1: usize) {
+fn bench_slotmap(iters: usize, len: usize) {
   #[inline(never)]
-  fn go(
-      slotmap: &mut slotmap::basic::SlotMap<slotmap::DefaultKey, KeyedNode<slotmap::DefaultKey, u64>>,
-      count_1: usize
-    ) -> KeyedList<slotmap::DefaultKey>
+  fn make_list
+    (
+      slotmap: &mut slotmap::SlotMap<slotmap::DefaultKey, NodeWithKey<slotmap::DefaultKey, u64>>,
+      len: usize
+    ) -> Option<slotmap::DefaultKey>
   {
-    let mut r = KeyedList::Nil;
-    for i in 0 .. count_1 {
-      r = KeyedList::Cons(slotmap.insert(KeyedNode { car: i as u64, cdr: r }));
+    let mut r = None;
+    for i in 0 .. len {
+      r = Some(slotmap.insert(NodeWithKey { car: i as u64, cdr: r }));
     }
     r
   }
-  let mut slotmap = slotmap::basic::SlotMap::new();
-  for _ in 0 .. count_0 {
-    let _: KeyedList<_> = hint::black_box(go(&mut slotmap, count_1));
+
+  let mut slotmap = slotmap::SlotMap::new();
+
+  for _ in 0 .. iters {
+    let _: _ = hint::black_box(make_list(&mut slotmap, len));
     slotmap.clear();
   }
 }
 
 #[inline(never)]
-fn bench_generational_arena<'a>(count_0: usize, count_1: usize) {
+fn bench_generational_arena(iters: usize, len: usize) {
   #[inline(never)]
-  fn go(
-      arena: &mut generational_arena::Arena<KeyedNode<generational_arena::Index, u64>>,
-      count_1: usize
-    ) -> KeyedList<generational_arena::Index>
+  fn make_list
+    (
+      arena: &mut generational_arena::Arena<NodeWithKey<generational_arena::Index, u64>>,
+      len: usize
+    ) -> Option<generational_arena::Index>
   {
-    let mut r = KeyedList::Nil;
-    for i in 0 .. count_1 {
-      r = KeyedList::Cons(arena.insert(KeyedNode { car: i as u64, cdr: r }));
+    let mut r = None;
+    for i in 0 .. len {
+      r = Some(arena.insert(NodeWithKey { car: i as u64, cdr: r }));
     }
     r
   }
+
   let mut arena = generational_arena::Arena::new();
-  for _ in 0 .. count_0 {
-    let _: KeyedList<_> = hint::black_box(go(&mut arena, count_1));
+
+  for _ in 0 .. iters {
+    let _: _ = hint::black_box(make_list(&mut arena, len));
     arena.clear();
+  }
+}
+
+#[inline(never)]
+fn bench_slab(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_list
+    (
+      slab: &mut slab::Slab<NodeWithKey<usize, u64>>,
+      len: usize
+    ) -> Option<usize>
+  {
+    let mut r = None;
+    for i in 0 .. len {
+      r = Some(slab.insert(NodeWithKey { car: i as u64, cdr: r }));
+    }
+    r
+  }
+
+  let mut slab = slab::Slab::new();
+
+  for _ in 0 .. iters {
+    let _: _ = hint::black_box(make_list(&mut slab, len));
+    slab.clear();
   }
 }
 
@@ -169,4 +195,5 @@ fn main() {
   run_bench("copy_arena", bench_copy_arena);
   run_bench("slotmap", bench_slotmap);
   run_bench("generational_arena", bench_generational_arena);
+  run_bench("slab", bench_slab);
 }

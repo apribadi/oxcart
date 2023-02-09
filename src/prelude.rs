@@ -8,7 +8,9 @@ pub(crate) use core::mem::align_of;
 pub(crate) use core::mem::needs_drop;
 pub(crate) use core::mem::size_of;
 pub(crate) use core::ptr::NonNull;
+pub(crate) use core::ptr::copy_nonoverlapping;
 pub(crate) use core::slice;
+pub(crate) use core::str;
 
 // feature strict_provenance - `core::ptr`
 
