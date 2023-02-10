@@ -20,7 +20,7 @@ fn test_arena() {
 
   let allocator = arena.allocator();
 
-  let x = allocator.alloc_slice(3).init(|i| (i as u64) + 1);
+  let x = allocator.alloc_slice(3).init_slice(|i| (i as u64) + 1);
 
   assert!(x[0] + x[1] + x[2] == 6);
 }
@@ -38,8 +38,8 @@ fn test_send_sync() {
   let y = allocator.alloc_slice::<i64>(2);
 
   send_sync::<oxcart::Allocator>(allocator);
-  send_sync::<oxcart::Uninit<_>>(&x);
-  send_sync::<oxcart::UninitSlice<_>>(&y);
+  send_sync::<oxcart::Slot<_>>(&x);
+  send_sync::<oxcart::Slot<_>>(&y);
 }
 
 #[test]

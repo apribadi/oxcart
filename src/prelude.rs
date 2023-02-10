@@ -8,7 +8,7 @@ pub(crate) use core::mem::align_of;
 pub(crate) use core::mem::needs_drop;
 pub(crate) use core::mem::size_of;
 pub(crate) use core::ptr::NonNull;
-pub(crate) use core::ptr::copy_nonoverlapping;
+pub(crate) use core::ptr;
 pub(crate) use core::slice;
 pub(crate) use core::str;
 
@@ -30,9 +30,9 @@ pub(crate) fn addr<T>(p: *const T) -> usize {
 
 #[inline(always)]
 pub(crate) fn mask<T>(p: *mut T, mask: usize) -> *mut T {
-  let p = p as *mut u8;
+  let p = p.cast::<u8>();
   let p = p.wrapping_sub(addr(p) & ! mask);
-  let p = p as *mut T;
+  let p = p.cast::<T>();
   p
 }
 

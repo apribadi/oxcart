@@ -17,6 +17,3 @@ generational-arena = "0.2.8"
 slab = "0.4.7"
 slotmap = "1.0.6"
 typed-arena = "2.0.2"
-
-[profile.release]
-opt-level = 1

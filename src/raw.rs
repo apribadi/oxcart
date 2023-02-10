@@ -19,8 +19,6 @@ struct Footer {
 pub(crate) trait Error {
   fn global_alloc_error(_: Layout) -> Self;
   fn layout_overflow() -> Self;
-  fn slice_too_long(_: usize) -> Self;
-  fn type_needs_drop() -> Self;
 }
 
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {

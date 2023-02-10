@@ -7,7 +7,7 @@
 //! let allocator = arena.allocator();
 //!
 //! let x: &mut u64 = allocator.alloc().init(13);
-//! let y: &mut [u64] = allocator.alloc_slice(5).init(|i| i as u64);
+//! let y: &mut [u64] = allocator.alloc_slice(5).init_slice(|i| i as u64);
 //!
 //! assert!(*x == 13);
 //! assert!(y == &[0, 1, 2, 3, 4]);
@@ -22,28 +22,23 @@
 #![warn(trivial_numeric_casts)]
 #![warn(unused_lifetimes)]
 #![warn(unused_qualifications)]
+#![warn(unused_results)]
 
 mod prelude;
-
 mod raw;
-
 use crate::prelude::*;
 
 /// A fast arena allocator.
 
 pub struct Arena(Allocator<'static>);
 
-/// A handle for allocating objects from the arena with a particular lifetime.
+/// A handle for allocating objects in the arena with a particular lifetime.
 
 pub struct Allocator<'a>(raw::Arena, PhantomData<&'a ()>);
 
-/// An uninitialized object in the arena.
+/// An uninitialized slot in the arena.
 
-pub struct Uninit<'a, T: 'a>(pub &'a mut MaybeUninit<T>);
-
-/// An uninitialized slice of objects in the arena.
-
-pub struct UninitSlice<'a, T: 'a>(pub &'a mut [MaybeUninit<T>]);
+pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<&'a ()>);
 
 /// A failed allocation from the arena.
 
@@ -52,8 +47,8 @@ pub struct AllocError;
 
 // SAFETY:
 //
-// The `Arena` and `Allocator` types conform to the usual shared xor mutable
-// discipline so it is safe for them to be `Send` and `Sync`.
+// The `Arena`, `Allocator`, and `Slot` types conform to the usual shared xor
+// mutable discipline so it is safe for them to be `Send` and `Sync`.
 
 unsafe impl Send for Arena {}
 
@@ -63,18 +58,16 @@ unsafe impl<'a> Send for Allocator<'a> {}
 
 unsafe impl<'a> Sync for Allocator<'a> {}
 
+unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
+
+unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+
 impl raw::Error for AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
 
   #[inline(always)]
   fn layout_overflow() -> Self { Self }
-
-  #[inline(always)]
-  fn slice_too_long(_: usize) -> Self { Self }
-
-  #[inline(always)]
-  fn type_needs_drop() -> Self { Self }
 }
 
 impl raw::Error for Infallible {
@@ -89,22 +82,17 @@ impl raw::Error for Infallible {
   fn layout_overflow() -> Self {
     panic!("layout overflow")
   }
+}
 
-  #[inline(never)]
-  #[cold]
-  fn slice_too_long(len: usize) -> Self {
-    panic!("slice too long: {len}")
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn type_needs_drop() -> Self {
-    panic!("type needs drop")
-  }
+#[inline(never)]
+#[cold]
+fn panic_type_needs_drop() -> ! {
+  panic!("type needs drop")
 }
 
 impl Arena {
-  /// Creates a new arena.
+  /// Creates a new arena. This does not acquire any memory from the global
+  /// allocator.
 
   #[inline(always)]
   pub fn new() -> Self {
@@ -122,13 +110,11 @@ impl Arena {
     // references from pointers.  For that code to be sound, it is necessary
     // for every user accessible `Allocator<_>` to have an appropriately
     // restricted lifetime parameter.
-    //
-    // Also, the lifetime parameter of `Allocator<_>` does not affect its
-    // representation, so we end up with a reference to a well-formed value.
 
     let p: &'a mut Allocator<'static> = &mut self.0;
-    let p: *mut Allocator<'static> = p;
-    let p: *mut Allocator<'a> = p.cast();
+    let p: *const Allocator<'static> = p;
+    let p: *const Allocator<'a> = p;
+    let p: *mut Allocator<'a> = p.cast_mut();
     let p: &'a mut Allocator<'a> = unsafe { &mut *p };
     p
   }
@@ -152,69 +138,74 @@ impl Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E>(&mut self) -> Result<Uninit<'a, T>, E>
+  fn gen_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
     where E: raw::Error
   {
-    if needs_drop::<T>() {
-      return Err(E::type_needs_drop());
-    }
-
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
-    let p = p.cast().as_ptr();
+    let p = p.cast();
 
     // SAFETY:
     //
+    // To satisfy invariants for `Slot`, we require that
+    //
     // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size and alignment.
+    // - The memory has the correct size.
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Ok(Uninit(unsafe { &mut *p }))
+    Ok(Slot(p, PhantomData))
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E>(&mut self, len: usize) -> Result<UninitSlice<'a, T>, E>
+  fn gen_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E>
     where E: raw::Error
   {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
-
-    if needs_drop::<T>() {
-      return Err(E::type_needs_drop());
-    }
 
     // Because `size_of::<T>() % align_of::<T>() == 0` for all types `T`, we
     // don't need to consider the case where rounding the size up to the
     // alignment exceeds `isize::MAX`.
 
     if size_of_element != 0 && len > isize::MAX as usize / size_of_element {
-      return Err(E::slice_too_long(len));
+      return Err(E::layout_overflow());
     }
 
     let size = size_of_element * len;
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.cast().as_ptr();
+    let p = ptr::slice_from_raw_parts_mut(p.as_ptr().cast(), len);
 
     // SAFETY:
     //
+    // To satisfy invariants for `Slot`, we require that
+    //
     // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size and alignment.
+    // - The memory has the correct size.
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Ok(UninitSlice(unsafe { slice::from_raw_parts_mut(p, len) }))
+    Ok(Slot(unsafe { NonNull::new_unchecked(p) }, PhantomData))
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E>(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
+  fn gen_alloc_layout<E>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E>
     where E: raw::Error
   {
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.cast().as_ptr();
+    let p = ptr::slice_from_raw_parts_mut(p.as_ptr().cast(), layout.size());
 
-    Ok(unsafe { slice::from_raw_parts_mut(p, layout.size()) })
+    // SAFETY:
+    //
+    // To satisfy invariants for `Slot`, we require that
+    //
+    // - The pointer is non-null and aligned, even if `size == 0`.
+    // - The memory has the correct size.
+    // - The memory is not aliased by any other reference.
+    // - The memory is live for the duration of the assigned lifetime.
+
+    Ok(Slot(unsafe { NonNull::new_unchecked(p) }, PhantomData))
   }
 
   #[inline(always)]
@@ -233,7 +224,7 @@ impl<'a> Allocator<'a> {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.cast().as_ptr();
+    let p = p.as_ptr().cast();
 
     // SAFETY:
     //
@@ -242,14 +233,14 @@ impl<'a> Allocator<'a> {
     // - The `src` and `dst` regions do not overlap.
     //
     // Note that the above holds, and in particular the pointers are non-null
-    // and aligned, even if we need to do zero-byte reads and writes.
+    // and aligned, even if we need to do a zero-byte read and write.
 
-    unsafe { copy_nonoverlapping(src.as_ptr(), p, len) };
+    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), p, len) };
 
     // SAFETY:
     //
     // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size and alignment.
+    // - The memory has the correct size.
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
     // - The memory is initialized.
@@ -261,23 +252,23 @@ impl<'a> Allocator<'a> {
   fn gen_copy_str<E>(&mut self, src: &str) -> Result<&'a mut str, E>
     where E: raw::Error
   {
-    let a = self.gen_copy_slice(src.as_bytes())?;
+    let t = self.gen_copy_slice(src.as_bytes())?;
 
-    // SAFETY: The byte array is valid UTF-8.
+    // SAFETY:
+    //
+    // The byte array is valid UTF-8 because `src` was valid UTF-8.
 
-    Ok(unsafe { str::from_utf8_unchecked_mut(a) })
+    Ok(unsafe { str::from_utf8_unchecked_mut(t) })
   }
 
   /// Allocates memory for a single object.
   ///
   /// # Panics
   ///
-  /// - `T` implements [`drop`](core::ops::Drop).
-  /// - Appending metadata to the allocation would overflow [`Layout`].
-  /// - The global allocator failed to allocate memory.
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> Uninit<'a, T> {
+  pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     unwrap(self.gen_alloc())
   }
 
@@ -285,10 +276,11 @@ impl<'a> Allocator<'a> {
   ///
   /// # Errors
   ///
-  /// See panic conditions for [`alloc`](Self::alloc).
+  /// An error is returned on failure to allocate memory.
+
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<Uninit<'a, T>, AllocError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     self.gen_alloc()
   }
 
@@ -296,13 +288,10 @@ impl<'a> Allocator<'a> {
   ///
   /// # Panics
   ///
-  /// - `T` implements [`drop`](core::ops::Drop).
-  /// - An array of `T` of the given length would overflow [`Layout`].
-  /// - Appending metadata to the allocation would overflow [`Layout`].
-  /// - The global allocator failed to allocate memory.
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> UninitSlice<'a, T> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
     unwrap(self.gen_alloc_slice(len))
   }
 
@@ -310,10 +299,10 @@ impl<'a> Allocator<'a> {
   ///
   /// # Errors
   ///
-  /// See panic conditions for [`alloc_slice`](Self::alloc_slice).
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<UninitSlice<'a, T>, AllocError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
     self.gen_alloc_slice(len)
   }
 
@@ -321,11 +310,10 @@ impl<'a> Allocator<'a> {
   ///
   /// # Panics
   ///
-  /// - Appending metadata to the allocation would overflow [`Layout`].
-  /// - The global allocator failed to allocate memory.
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
+  pub fn alloc_layout(&mut self, layout: Layout) -> Slot<'a, [u8]> {
     unwrap(self.gen_alloc_layout(layout))
   }
 
@@ -333,10 +321,10 @@ impl<'a> Allocator<'a> {
   ///
   /// # Errors
   ///
-  /// See panic conditions for [`alloc_layout`](Self::alloc_layout).
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, AllocError> {
     self.gen_alloc_layout(layout)
   }
 
@@ -344,8 +332,7 @@ impl<'a> Allocator<'a> {
   ///
   /// # Panics
   ///
-  /// - Appending metadata to the allocation would overflow [`Layout`].
-  /// - The global allocator failed to allocate memory.
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
   pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
@@ -356,7 +343,7 @@ impl<'a> Allocator<'a> {
   ///
   /// # Errors
   ///
-  /// See panic conditions for [`copy_slice`](Self::copy_slice).
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
   pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError> {
@@ -367,8 +354,7 @@ impl<'a> Allocator<'a> {
   ///
   /// # Panics
   ///
-  /// - Appending metadata to the allocation would overflow [`Layout`].
-  /// - The global allocator failed to allocate memory.
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
@@ -379,7 +365,7 @@ impl<'a> Allocator<'a> {
   ///
   /// # Errors
   ///
-  /// See panic conditions for [`copy_str`](Self::copy_str).
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
   pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
@@ -387,37 +373,104 @@ impl<'a> Allocator<'a> {
   }
 }
 
-impl<'a, T> Uninit<'a, T> {
-  /// Initializes the object with the given value.
+impl<'a, T: ?Sized> Slot<'a, T> {
+  /// Converts the slot into a non-null pointer to its underlying memory.
+  ///
+  /// The pointer is properly aligned.
 
-  #[inline(always)]
-  pub fn init(self, value: T) -> &'a mut T {
-    self.0.write(value)
+  pub fn as_non_null(self) -> NonNull<T> {
+    self.0
+  }
+
+  /// Converts the slot into a pointer to its underlying memory.
+  ///
+  /// The pointer is non-null and properly aligned.
+
+  pub fn as_ptr(self) -> *mut T {
+    self.0.as_ptr()
   }
 }
 
-impl<'a, T> UninitSlice<'a, T> {
-  /// Initializes the slice with values produced by calling the given function
-  /// with each index in order.
+impl<'a, T> Slot<'a, T> {
+  /// Converts the slot into a reference to an uninitialized value.
 
   #[inline(always)]
-  pub fn init<F>(self, f: F) -> &'a mut [T]
+  pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
+    let p = self.0.as_ptr().cast();
+
+    // SAFETY:
+    //
+    // The pointed-to memory is valid for `T`, though uninitialized.
+
+    unsafe { &mut *p }
+  }
+
+  /// Initializes the object with the given value.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
+
+  #[inline(always)]
+  pub fn init(self, value: T) -> &'a mut T {
+    if needs_drop::<T>() {
+      panic_type_needs_drop();
+    }
+
+    self.as_uninit().write(value)
+  }
+}
+
+impl<'a, T> Slot<'a, [T]> {
+  /// The length of the slice (in items, not bytes) occupying the slot.
+
+  #[inline(always)]
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+
+  /// Converts the slot into a reference to a slice of uninitialized values.
+
+  #[inline(always)]
+  pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
+    let n = self.0.len();
+    let p = self.0.as_ptr().cast();
+
+    // SAFETY:
+    //
+    // The pointed-to memory is valid for a slice of `T`s, though
+    // uninitialized.
+
+    unsafe { slice::from_raw_parts_mut(p, n) }
+  }
+
+  /// Initializes the slice with values produced by calling the given function
+  /// with each index in order.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
+
+  #[inline(always)]
+  pub fn init_slice<F>(self, f: F) -> &'a mut [T]
     where F: FnMut(usize) -> T
   {
+    if needs_drop::<T>() {
+      panic_type_needs_drop();
+    }
+
     let mut f = f;
 
-    for (i, a) in self.0.iter_mut().enumerate() {
-      a.write(f(i));
+    let p = self.as_uninit_slice();
+
+    for (i, elt) in p.iter_mut().enumerate() {
+      let _: _ = elt.write(f(i));
     }
 
     // SAFETY:
     //
-    // - Every slice element has been initialized.
+    // Every slice element has been initialized.
 
-    unsafe { slice_assume_init_mut(self.0) }
+    unsafe { slice_assume_init_mut(p) }
   }
-}
-
-pub fn foo<'a>(allocator: &mut Allocator<'a>, s: &str) -> &'a mut str {
-  allocator.copy_str(s)
 }
