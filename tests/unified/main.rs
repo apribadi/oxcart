@@ -1,9 +1,11 @@
-pub use expect_test::expect;
-pub use oxcart::Arena;
+use core::alloc::Layout;
+use core::fmt;
+use oxcart::Arena;
 
 #[test]
 fn test_arena() {
   let mut arena = Arena::new();
+
   let allocator = arena.allocator();
 
   let x = allocator.alloc().init(0);
@@ -20,9 +22,31 @@ fn test_arena() {
 
   let allocator = arena.allocator();
 
+  let _ = allocator.alloc::<[u64; 100000]>();
+  let _ = allocator.alloc::<[u64; 0]>();
+  let _ = allocator.alloc::<[u64; 1]>();
+
+  arena.reset();
+
+  let allocator = arena.allocator();
+
   let x = allocator.alloc_slice(3).init_slice(|i| (i as u64) + 1);
+  let y = allocator.alloc_layout(Layout::new::<[u64; 10]>());
+  let z: &mut dyn fmt::Display = allocator.alloc().init(13u64);
 
   assert!(x[0] + x[1] + x[2] == 6);
+  assert!(y.len() == 80);
+  assert!(&format!("{z}") == "13");
+
+  arena.reset();
+}
+
+#[test]
+fn test_zst() {
+  let mut arena = Arena::new();
+  let allocator = arena.allocator();
+  let x = allocator.alloc().init(());
+  assert!(*x == ());
 }
 
 #[test]

@@ -1,20 +1,4 @@
-//! An arena allocator.
-//!
-//! # Example
-//!
-//! ```
-//! let mut arena = oxcart::Arena::new();
-//! let allocator = arena.allocator();
-//!
-//! let x: &mut u64 = allocator.alloc().init(13);
-//! let y: &mut [u64] = allocator.alloc_slice(5).init_slice(|i| i as u64);
-//!
-//! assert!(*x == 13);
-//! assert!(y == &[0, 1, 2, 3, 4]);
-//!
-//! arena.reset();
-//! ```
-
+#![doc = include_str!("../README.md")]
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(elided_lifetimes_in_paths)]
@@ -25,20 +9,21 @@
 #![warn(unused_results)]
 
 mod prelude;
-
 mod raw;
-
 use crate::prelude::*;
 
-/// A fast arena allocator.
+/// An arena allocator.
 
 pub struct Arena(Allocator<'static>);
 
-/// A handle for allocating objects in the arena with a particular lifetime.
+/// A handle for allocating objects from an arena with a particular lifetime.
 
 pub struct Allocator<'a>(raw::Arena, PhantomData<&'a ()>);
 
 /// An uninitialized slot in the arena.
+///
+/// Typically you will immediately call [`init`](Self::init) or
+/// [`init_slice`](Self::init_slice) to initialize the slot.
 
 pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, PhantomData<&'a ()>);
 
@@ -121,10 +106,8 @@ impl Arena {
     // for every user accessible `Allocator<_>` to have an appropriately
     // restricted lifetime parameter.
 
-    let p: &'a mut Allocator<'static> = &mut self.0;
-    let p: *const Allocator<'static> = p;
-    let p: *const Allocator<'a> = p;
-    let p: *mut Allocator<'a> = p.cast_mut();
+    let p: *mut Allocator<'static> = &mut self.0;
+    let p: *mut Allocator<'a> = p.cast();
     let p: &'a mut Allocator<'a> = unsafe { &mut *p };
     p
   }
@@ -148,9 +131,7 @@ impl Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
-    where E: raw::Error
-  {
+  fn gen_alloc<T, E: raw::Error>(&mut self) -> Result<Slot<'a, T>, E> {
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.cast();
 
@@ -167,9 +148,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E>
-    where E: raw::Error
-  {
+  fn gen_alloc_slice<T, E: raw::Error>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
 
@@ -200,9 +179,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E>
-    where E: raw::Error
-  {
+  fn gen_alloc_layout<E: raw::Error>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
     let p = self.0.alloc::<E>(layout)?;
     let p = ptr::slice_from_raw_parts_mut(p.as_ptr().cast(), layout.size());
 
@@ -219,9 +196,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_slice<T: Copy, E>(&mut self, src: &[T]) -> Result<&'a mut [T], E>
-    where E: raw::Error
-  {
+  fn gen_copy_slice<T: Copy, E: raw::Error>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
     // NB:
     //
     // - `Copy` implies `!Drop`.
@@ -259,9 +234,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_str<E>(&mut self, src: &str) -> Result<&'a mut str, E>
-    where E: raw::Error
-  {
+  fn gen_copy_str<E: raw::Error>(&mut self, src: &str) -> Result<&'a mut str, E> {
     let t = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
@@ -462,9 +435,7 @@ impl<'a, T> Slot<'a, [T]> {
   /// Panics if `T` implements [`Drop`].
 
   #[inline(always)]
-  pub fn init_slice<F>(self, f: F) -> &'a mut [T]
-    where F: FnMut(usize) -> T
-  {
+  pub fn init_slice<F: FnMut(usize) -> T>(self, f: F) -> &'a mut [T] {
     if needs_drop::<T>() {
       panic_type_needs_drop();
     }
