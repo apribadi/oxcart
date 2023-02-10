@@ -25,7 +25,9 @@
 #![warn(unused_results)]
 
 mod prelude;
+
 mod raw;
+
 use crate::prelude::*;
 
 /// A fast arena allocator.
@@ -38,29 +40,37 @@ pub struct Allocator<'a>(raw::Arena, PhantomData<&'a ()>);
 
 /// An uninitialized slot in the arena.
 
-pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<&'a ()>);
+pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, PhantomData<&'a ()>);
 
 /// A failed allocation from the arena.
 
-#[derive(Clone, Debug)]
+#[derive(Debug)]
 pub struct AllocError;
+
+enum Panicked {}
 
 // SAFETY:
 //
-// The `Arena`, `Allocator`, and `Slot` types conform to the usual shared xor
-// mutable discipline so it is safe for them to be `Send` and `Sync`.
-
-unsafe impl Send for Arena {}
-
-unsafe impl Sync for Arena {}
-
-unsafe impl<'a> Send for Allocator<'a> {}
-
-unsafe impl<'a> Sync for Allocator<'a> {}
+// The `Slot` type conforms to the usual shared xor mutable discipline,
+// despite containing a pointer.
 
 unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
 unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+
+#[inline(always)]
+pub(crate) fn unwrap<T>(x: Result<T, Panicked>) -> T {
+  match x {
+    Ok(x) => x,
+    Err(e) => match e {}
+  }
+}
+
+impl fmt::Display for AllocError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
+    f.write_str("AllocError")
+  }
+}
 
 impl raw::Error for AllocError {
   #[inline(always)]
@@ -70,7 +80,7 @@ impl raw::Error for AllocError {
   fn layout_overflow() -> Self { Self }
 }
 
-impl raw::Error for Infallible {
+impl raw::Error for Panicked {
   #[inline(never)]
   #[cold]
   fn global_alloc_error(layout: Layout) -> Self {

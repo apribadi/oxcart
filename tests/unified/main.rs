@@ -44,22 +44,22 @@ fn test_send_sync() {
 
 #[test]
 fn test_list() {
-  enum List<'a, A> {
+  enum List<'a, T> {
     Nil,
-    Cons(&'a Node<'a, A>),
+    Cons(&'a Node<'a, T>),
   }
 
   #[allow(dead_code)]
-  struct Node<'a, A> {
-    car: A,
-    cdr: List<'a, A>
+  struct Node<'a, T> {
+    car: T,
+    cdr: List<'a, T>
   }
 
   let mut arena = Arena::new();
   let allocator = arena.allocator();
 
-  let mut x = List::Nil;
+  let mut a = List::Nil;
   for i in 0 .. 100 {
-    x = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: x }));
+    a = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: a }));
   }
 }

@@ -1,7 +1,7 @@
 pub(crate) extern crate alloc;
 pub(crate) use core::alloc::Layout;
 pub(crate) use core::cmp::max;
-pub(crate) use core::convert::Infallible;
+pub(crate) use core::fmt;
 pub(crate) use core::marker::PhantomData;
 pub(crate) use core::mem::MaybeUninit;
 pub(crate) use core::mem::align_of;
@@ -44,12 +44,4 @@ pub(crate) unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut 
   let p: *mut [T] = p as *mut [T];
   let p: &mut [T] = unsafe { &mut *p };
   p
-}
-
-#[inline(always)]
-pub(crate) fn unwrap<T>(x: Result<T, Infallible>) -> T {
-  match x {
-    Ok(x) => x,
-    Err(e) => match e {}
-  }
 }

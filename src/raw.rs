@@ -10,6 +10,15 @@ pub(crate) struct Arena {
   hi: *mut Footer,
 }
 
+// SAFETY:
+//
+// The `Arena` type conforms to the usual shared xor mutable discipline,
+// despite containing pointers.
+
+unsafe impl Send for Arena {}
+
+unsafe impl Sync for Arena {}
+
 struct Footer {
   layout: Layout,
   next: *mut Footer,
@@ -24,7 +33,7 @@ pub(crate) trait Error {
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
   //
-  // - `p` must be the head of a valid linked list of chunks.
+  // `p` must be the head of a valid linked list of chunks.
 
   // STACK SPACE:
   //
@@ -55,11 +64,11 @@ unsafe fn alloc_chunk_for<E: Error>
 {
   // SAFETY:
   //
-  // -
+  // ???
 
   // POSTCONDITIONS:
   //
-  // -
+  // ???
 
   const _: () = assert!(MIN_CHUNK_SIZE % MIN_CHUNK_ALIGN == 0);
   const _: () = assert!(MIN_CHUNK_SIZE <= isize::MAX as usize);
