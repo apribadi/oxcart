@@ -30,18 +30,15 @@ pub(crate) fn addr<T>(p: *const T) -> usize {
 
 #[inline(always)]
 pub(crate) fn mask<T>(p: *mut T, mask: usize) -> *mut T {
-  let p = p.cast::<u8>();
-  let p = p.wrapping_sub(addr(p) & ! mask);
-  let p = p.cast::<T>();
-  p
+  let p = p as *mut u8;
+  p.wrapping_sub(addr(p) & ! mask) as *mut _
 }
 
 // feature slice_assume_init_mut - `core::mem::MaybeUninit`
 
 #[inline(always)]
 pub(crate) unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
-  let p: *mut [MaybeUninit<T>] = p;
-  let p: *mut [T] = p as *mut [T];
-  let p: &mut [T] = unsafe { &mut *p };
-  p
+  let p = p as *mut _;
+  let p = p as *mut _;
+  unsafe { &mut *p }
 }

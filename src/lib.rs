@@ -2,7 +2,6 @@
 #![no_std]
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(elided_lifetimes_in_paths)]
-#![warn(trivial_casts)]
 #![warn(trivial_numeric_casts)]
 #![warn(unused_lifetimes)]
 #![warn(unused_qualifications)]
@@ -18,21 +17,14 @@ pub struct Arena(Allocator<'static>);
 
 /// A handle for allocating objects from an arena with a particular lifetime.
 
-pub struct Allocator<'a>(raw::Arena, PhantomData<&'a ()>);
+pub struct Allocator<'a>(raw::Arena, InvariantLifetime<'a>);
 
 /// An uninitialized slot in the arena.
 ///
 /// Typically you will immediately call [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice) to initialize the slot.
 
-pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, PhantomData<&'a ()>);
-
-/// A failed allocation from the arena.
-
-#[derive(Debug)]
-pub struct AllocError;
-
-enum Panicked {}
+pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, InvariantLifetime<'a>);
 
 // SAFETY:
 //
@@ -43,13 +35,16 @@ unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
 unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
 
-#[inline(always)]
-pub(crate) fn unwrap<T>(x: Result<T, Panicked>) -> T {
-  match x {
-    Ok(x) => x,
-    Err(e) => match e {}
-  }
-}
+// We make the `Allocator` and `Slot` types invariant with respect to their
+// associated lifetime. It would be ok to make them covariant, but that
+// shouldn't be necessary for any use case.
+
+type InvariantLifetime<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
+
+/// A failed allocation from the arena.
+
+#[derive(Debug)]
+pub struct AllocError;
 
 impl fmt::Display for AllocError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
@@ -63,6 +58,18 @@ impl raw::Error for AllocError {
 
   #[inline(always)]
   fn layout_overflow() -> Self { Self }
+}
+
+enum Panicked {}
+
+impl Panicked {
+  #[inline(always)]
+  fn unwrap<T>(x: Result<T, Panicked>) -> T {
+    match x {
+      Ok(x) => x,
+      Err(e) => match e {}
+    }
+  }
 }
 
 impl raw::Error for Panicked {
@@ -101,15 +108,16 @@ impl Arena {
   pub fn allocator<'a>(&'a mut self) -> &'a mut Allocator<'a> {
     // SAFETY:
     //
-    // Various allocation methods on `Allocator<_>` use unsafe code to create
-    // references from pointers.  For that code to be sound, it is necessary
-    // for every user accessible `Allocator<_>` to have an appropriately
-    // restricted lifetime parameter.
+    // Various allocation methods use unsafe code to create references from
+    // pointers.  For that code to be sound, it is necessary for every user
+    // accessible `Allocator<_>` to have an appropriately restricted lifetime
+    // parameter.
 
-    let p: *mut Allocator<'static> = &mut self.0;
-    let p: *mut Allocator<'a> = p.cast();
-    let p: &'a mut Allocator<'a> = unsafe { &mut *p };
-    p
+    let p = &mut self.0;
+    let p = p as *mut _;
+    let p = p as *const _;
+    let p = p as *mut _;
+    unsafe { &mut *p }
   }
 
   /// Deallocates all objects previously allocated from the arena. The arena
@@ -120,10 +128,10 @@ impl Arena {
   pub fn reset(&mut self) {
     // SAFETY:
     //
-    // Various allocation methods on `Allocator<_>` use unsafe code to create
-    // references from pointers.  For that code to be sound, it is necessary
-    // for this method to force the end of any lifetime associated with an
-    // `Allocator<_>`.
+    // Various allocation methods use unsafe code to create references from
+    // pointers.  For that code to be sound, it is necessary for calling this
+    // method to imply that any lifetime associated with an `Allocator<_>` has
+    // already ended.
 
     self.0.0.reset()
   }
@@ -164,7 +172,8 @@ impl<'a> Allocator<'a> {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = ptr::slice_from_raw_parts_mut(p.as_ptr().cast(), len);
+    let p = p.as_ptr() as *mut _;
+    let p = ptr::slice_from_raw_parts_mut(p, len);
 
     // SAFETY:
     //
@@ -181,7 +190,8 @@ impl<'a> Allocator<'a> {
   #[inline(always)]
   fn gen_alloc_layout<E: raw::Error>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
     let p = self.0.alloc::<E>(layout)?;
-    let p = ptr::slice_from_raw_parts_mut(p.as_ptr().cast(), layout.size());
+    let p = p.as_ptr();
+    let p = ptr::slice_from_raw_parts_mut(p, layout.size());
 
     // SAFETY:
     //
@@ -209,7 +219,7 @@ impl<'a> Allocator<'a> {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr().cast();
+    let p = p.as_ptr() as *mut _;
 
     // SAFETY:
     //
@@ -217,8 +227,8 @@ impl<'a> Allocator<'a> {
     // - The `dst` argument is valid for writing `T`s.
     // - The `src` and `dst` regions do not overlap.
     //
-    // Note that the above holds, and in particular the pointers are non-null
-    // and aligned, even if we need to do a zero-byte read and write.
+    // Note that the above holds, and in particular that the pointers are
+    // non-null and aligned, even if we need to do a zero-byte read and write.
 
     unsafe { ptr::copy_nonoverlapping(src.as_ptr(), p, len) };
 
@@ -252,7 +262,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
-    unwrap(self.gen_alloc())
+    Panicked::unwrap(self.gen_alloc())
   }
 
   /// Allocates memory for a single object.
@@ -275,7 +285,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
-    unwrap(self.gen_alloc_slice(len))
+    Panicked::unwrap(self.gen_alloc_slice(len))
   }
 
   /// Allocates memory for a slice of the given length.
@@ -297,7 +307,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> Slot<'a, [u8]> {
-    unwrap(self.gen_alloc_layout(layout))
+    Panicked::unwrap(self.gen_alloc_layout(layout))
   }
 
   /// Allocates memory for the given layout.
@@ -319,7 +329,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
-    unwrap(self.gen_copy_slice(src))
+    Panicked::unwrap(self.gen_copy_slice(src))
   }
 
   /// Copies the slice into a new allocation.
@@ -341,7 +351,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
-    unwrap(self.gen_copy_str(src))
+    Panicked::unwrap(self.gen_copy_str(src))
   }
 
   /// Copies the string into a new allocation.
@@ -379,7 +389,7 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = self.0.as_ptr().cast();
+    let p = self.0.as_ptr() as *mut _;
 
     // SAFETY:
     //
@@ -417,7 +427,7 @@ impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     let n = self.0.len();
-    let p = self.0.as_ptr().cast();
+    let p = self.0.as_ptr() as *mut _;
 
     // SAFETY:
     //
