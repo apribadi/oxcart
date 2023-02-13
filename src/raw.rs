@@ -64,11 +64,17 @@ unsafe fn alloc_chunk_for<E: Error>
 {
   // SAFETY:
   //
-  // ???
+  // `chunks` must either be null or point to a valid `Footer`.
 
   // POSTCONDITIONS:
   //
-  // ???
+  // If this function returns `Ok(_)`, then it has allocated a new chunk and
+  // placed it at the head of linked list whose previous head was `chunks`.
+  // Additionally, the first (`*mut u8`) pointer points to memory suitable for
+  // the start of an object with layout `object`.
+  //
+  // If this function returns `Err(_)`, then the linked list of chunks is
+  // unmodified.
 
   const _: () = assert!(MIN_CHUNK_SIZE % MIN_CHUNK_ALIGN == 0);
   const _: () = assert!(MIN_CHUNK_SIZE <= isize::MAX as usize);
@@ -197,6 +203,13 @@ impl Arena {
     self.lo = self.lo.wrapping_add(size);
 
     Ok(p)
+  }
+
+  pub(crate) fn debug(&self, name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct(name)
+      .field("lo", &self.lo)
+      .field("hi", &self.hi)
+      .finish()
   }
 }
 

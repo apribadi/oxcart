@@ -32,7 +32,7 @@ arena.reset();
 ## Non-Features
 
 - no allocation through an immutable reference
-- no stack of regions
+- no nested stack of regions
 - no `drop` calls for objects upon arena `reset` or `drop`
 - no `allocator_api` integration
 

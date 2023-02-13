@@ -49,12 +49,6 @@ type InvariantLifetime<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 #[derive(Debug)]
 pub struct AllocError;
 
-impl fmt::Display for AllocError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> Result<(), fmt::Error> {
-    f.write_str("AllocError")
-  }
-}
-
 impl raw::Error for AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
@@ -144,6 +138,18 @@ impl Default for Arena {
   #[inline(always)]
   fn default() -> Self {
     Self::new()
+  }
+}
+
+impl fmt::Debug for Arena {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.0.debug("Arena", f)
+  }
+}
+
+impl fmt::Debug for Allocator<'_> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.debug("Allocator", f)
   }
 }
 
