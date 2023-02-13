@@ -108,7 +108,7 @@ impl Arena {
   /// from this mutable borrow is propagated to those allocations.
 
   #[inline(always)]
-  pub fn allocator<'a>(&'a mut self) -> &'a mut Allocator<'a> {
+  pub fn allocator(&mut self) -> &mut Allocator<'_> {
     // SAFETY:
     //
     // Various allocation methods use unsafe code to create references from
@@ -137,6 +137,13 @@ impl Arena {
     // already ended.
 
     self.0.0.reset()
+  }
+}
+
+impl Default for Arena {
+  #[inline(always)]
+  fn default() -> Self {
+    Self::new()
   }
 }
 
