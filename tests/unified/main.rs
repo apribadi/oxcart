@@ -106,14 +106,23 @@ fn test_types_are_send_and_sync() {
 
 #[test]
 fn test_linked_list() {
-  #[allow(dead_code)]
-  struct Node<'a, T> { car: T, cdr: Option<&'a Node<'a, T>> }
+  struct Node<'a, T> {
+    car: T,
+    cdr: Option<&'a Node<'a, T>>
+  }
+
   let mut arena = Arena::new();
   let allocator = arena.allocator();
   let mut head: Option<&Node<u64>> = None;
   for i in 0 .. 10 {
     head = Some(allocator.alloc().init(Node { car: i as u64, cdr: head }));
   }
+  let mut sum = 0;
+  while let Some(node) = head {
+    sum += node.car;
+    head = node.cdr;
+  }
+  assert!(sum == 45);
 }
 
 #[test]
