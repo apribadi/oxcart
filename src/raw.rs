@@ -21,7 +21,7 @@ unsafe impl Sync for Arena {}
 
 struct Footer {
   layout: Layout,
-  next: *mut Footer,
+  next: Option<NonNull<Footer>>,
   total_allocated: usize,
 }
 
@@ -48,7 +48,7 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 
   unsafe { alloc::alloc::dealloc(p, t.layout) }
 
-  if let Some(p) = NonNull::new(t.next) {
+  if let Some(p) = t.next {
     unsafe { dealloc_chunk_list(p) }
   }
 }
@@ -75,11 +75,12 @@ unsafe fn alloc_chunk_for<E: Error>
   const _: () = assert!(FOOTER_SIZE <= MIN_CHUNK_SIZE);
   const _: () = assert!(FOOTER_ALIGN <= MIN_CHUNK_ALIGN);
 
+  let chunks = NonNull::new(chunks);
+
   let total_allocated =
-    if chunks.is_null() {
-      0
-    } else {
-      unsafe { &*chunks }.total_allocated
+    match chunks {
+      None => 0,
+      Some(chunks) => unsafe { chunks.as_ref() }.total_allocated
     };
 
   let object_size = object.size();
@@ -161,7 +162,6 @@ impl Arena {
     }
   }
 
-  #[inline(always)]
   pub(crate) fn reset(&mut self) {
     let hi = self.hi;
 
@@ -170,8 +170,8 @@ impl Arena {
 
       self.lo = (hi as *mut u8).wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
 
-      if let Some(next) = NonNull::new(f.next) {
-        f.next = invalid_mut(0);
+      if let Some(next) = f.next {
+        f.next = None;
         unsafe { dealloc_chunk_list(next) }
       }
     }
