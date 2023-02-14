@@ -10,9 +10,26 @@
 #![warn(unused_qualifications)]
 #![warn(unused_results)]
 
-mod prelude;
-mod raw;
-use crate::prelude::*;
+extern crate alloc;
+
+use core::alloc::Layout;
+use core::cmp::max;
+use core::fmt;
+use core::marker::PhantomData;
+use core::mem::MaybeUninit;
+use core::mem::align_of;
+use core::mem::needs_drop;
+use core::mem::size_of;
+use core::ptr::NonNull;
+use core::ptr;
+use core::slice;
+use core::str;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// PUBLIC TYPE DEFINITIONS
+//
+////////////////////////////////////////////////////////////////////////////////
 
 /// An arena allocator.
 
@@ -20,14 +37,299 @@ pub struct Arena(Allocator<'static>);
 
 /// A handle for allocating objects from an arena with a particular lifetime.
 
-pub struct Allocator<'a>(raw::Arena, InvariantLifetime<'a>);
+pub struct Allocator<'a>(RawArena, InvariantLifetime<'a>);
 
 /// An uninitialized slot in the arena.
 ///
-/// Typically you will immediately call [`init`](Self::init) or
-/// [`init_slice`](Self::init_slice) to initialize the slot.
+/// Typically you will initialize the slot with [`init`](Self::init) or
+/// [`init_slice`](Self::init_slice).
 
 pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, InvariantLifetime<'a>);
+
+/// A failed allocation from the arena.
+
+#[derive(Debug)]
+pub struct AllocError;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// PRIVATE TYPE DEFINITIONS AND TRAITS
+//
+////////////////////////////////////////////////////////////////////////////////
+
+type InvariantLifetime<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
+
+enum Void {}
+
+struct RawArena {
+  lo: *mut u8,
+  hi: *mut Footer,
+}
+
+struct Footer {
+  layout: Layout,
+  next: Option<NonNull<Footer>>,
+  total_allocated: usize,
+}
+
+trait RawError {
+  fn global_alloc_error(_: Layout) -> Self;
+  fn layout_overflow() -> Self;
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// CONSTANTS
+//
+////////////////////////////////////////////////////////////////////////////////
+
+const FOOTER_SIZE: usize = size_of::<Footer>();
+const FOOTER_ALIGN: usize = align_of::<Footer>();
+const MIN_CHUNK_SIZE: usize = 1 << 16; // 64kb
+const MIN_CHUNK_ALIGN: usize = FOOTER_ALIGN;
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// UTILITY FUNCTIONS
+//
+////////////////////////////////////////////////////////////////////////////////
+
+// feature strict_provenance - `core::ptr`
+
+#[inline(always)]
+fn invalid_mut<T>(addr: usize) -> *mut T {
+  unsafe { core::mem::transmute(addr) }
+}
+
+// feature strict_provenance - method of `*const T`
+
+#[inline(always)]
+fn addr<T>(p: *const T) -> usize {
+  unsafe { core::mem::transmute(p) }
+}
+
+// feature ptr_mask - method of `*mut T`
+
+#[inline(always)]
+fn mask<T>(p: *mut T, mask: usize) -> *mut T {
+  let p = p as *mut u8;
+  p.wrapping_sub(addr(p) & ! mask) as *mut _
+}
+
+// feature slice_assume_init_mut - `core::mem::MaybeUninit`
+
+#[inline(always)]
+unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
+  let p = p as *mut _;
+  let p = p as *mut _;
+  unsafe { &mut *p }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// RawArena
+//
+////////////////////////////////////////////////////////////////////////////////
+
+// SAFETY:
+//
+// The `RawArena` type conforms to the usual shared xor mutable discipline,
+// despite containing pointers.
+
+unsafe impl Send for RawArena {}
+
+unsafe impl Sync for RawArena {}
+
+unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
+  // SAFETY:
+  //
+  // `p` must be the head of a valid linked list of chunks.
+
+  // STACK SPACE:
+  //
+  // Chunk sizes grow exponentially, so stack usage is O(log(word size)) at
+  // worst even without TCO.
+
+  let p = p.as_ptr();
+  let t = unsafe { p.read() };
+  let p = p as *mut u8;
+  let p = p.wrapping_add(FOOTER_SIZE);
+  let p = p.wrapping_sub(t.layout.size());
+
+  unsafe { alloc::alloc::dealloc(p, t.layout) }
+
+  if let Some(p) = t.next {
+    unsafe { dealloc_chunk_list(p) }
+  }
+}
+
+#[inline(never)]
+#[cold]
+unsafe fn alloc_chunk_for<E: RawError>
+  (
+    object: Layout,
+    chunks: *mut Footer
+  )
+  -> Result<(*mut u8, *mut Footer), E>
+{
+  // SAFETY:
+  //
+  // `chunks` must either be null or point to a valid `Footer`.
+
+  // POSTCONDITIONS:
+  //
+  // If this function returns `Ok(_)`, then it has allocated a new chunk and
+  // placed it at the head of linked list whose previous head was `chunks`.
+  // Additionally, the first (`*mut u8`) pointer points to memory suitable for
+  // the start of an object with layout `object`.
+  //
+  // If this function returns `Err(_)`, then the linked list of chunks is
+  // unmodified.
+
+  const _: () = assert!(MIN_CHUNK_SIZE % MIN_CHUNK_ALIGN == 0);
+  const _: () = assert!(MIN_CHUNK_SIZE <= isize::MAX as usize);
+  const _: () = assert!(FOOTER_SIZE <= MIN_CHUNK_SIZE);
+  const _: () = assert!(FOOTER_ALIGN <= MIN_CHUNK_ALIGN);
+
+  let chunks = NonNull::new(chunks);
+
+  let total_allocated =
+    match chunks {
+      None => 0,
+      Some(chunks) => unsafe { chunks.as_ref() }.total_allocated
+    };
+
+  let object_size = object.size();
+  let object_align = object.align();
+
+  // The chunk size we'd like to allocate, if the object will fit in it.  It
+  // is always a power of two `<= 0b0100...`.
+
+  let size_0 = total_allocated / 4 + 1;
+  let size_0 = 1 << (usize::BITS - (size_0 - 1).leading_zeros());
+  let size_0 = max(size_0, MIN_CHUNK_SIZE);
+
+  // The size of any `Layout` is guaranteed to be `<= isize::MAX`. It follows
+  // that `size_1` does not overflow `usize`.
+
+  let size_1 = object_size.wrapping_add(FOOTER_ALIGN - 1) & ! (FOOTER_ALIGN - 1);
+  let size_1 = size_1 + FOOTER_SIZE;
+
+  let size = max(size_0, size_1);
+  let align = max(object_align, MIN_CHUNK_ALIGN);
+
+  // We can construct a valid `Layout` if and only if `size` rounded up to
+  // `align` does not overflow and is `<= isize::MAX`.
+  //
+  // Note that a very large `object_size` is necessary for this to occur; the
+  // exponential chunk growth alone will not cause this to overflow.
+
+  if size > isize::MAX as usize - (align - 1) {
+    return Err(E::layout_overflow());
+  }
+
+  // SAFETY:
+  //
+  // - `align != 0`
+  // - `align` is a power of two
+  // - `size` rounded up to a multiple of `align` is `<= isize::MAX`
+
+  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+
+  // SAFETY:
+  //
+  // - `size != 0`
+
+  let lo = unsafe { alloc::alloc::alloc(layout) };
+
+  if lo.is_null() {
+    return Err(E::global_alloc_error(layout));
+  }
+
+  // We have made sure that the chunk is aligned to at least
+  // `align_of::<Footer>()` and that its size is a multiple of
+  // `align_of::<Footer>(), so we can place the tail at the very end of the
+  // chunk.
+
+  let hi = lo.wrapping_add(size).wrapping_sub(FOOTER_SIZE) as *mut Footer;
+
+  let total_allocated = total_allocated.saturating_add(size);
+
+  // SAFETY:
+  //
+  // - `hi` is valid and aligned for writing a `Footer`.
+
+  unsafe { hi.write(Footer { layout, next: chunks, total_allocated }) };
+
+  Ok((lo, hi))
+}
+
+impl RawArena {
+  #[inline(always)]
+  pub(crate) fn new() -> Self {
+    // NB:
+    //
+    // - `lo > hi` so there is no space for ZSTs.
+    // - `hi - align_up(lo, MAX_ALIGN) == isize::MIN`.
+
+    Self {
+      lo: invalid_mut(1),
+      hi: invalid_mut(0),
+    }
+  }
+
+  pub(crate) fn reset(&mut self) {
+    let hi = self.hi;
+
+    if ! hi.is_null() {
+      let f = unsafe { &mut *hi };
+
+      self.lo = (hi as *mut u8).wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
+
+      if let Some(next) = f.next {
+        f.next = None;
+        unsafe { dealloc_chunk_list(next) }
+      }
+    }
+  }
+
+  #[inline(always)]
+  pub(crate) fn alloc<E: RawError>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
+    let size = layout.size();
+    let align = layout.align();
+
+    let lo = mask(self.lo.wrapping_add(align - 1), ! (align - 1));
+
+    if size as isize > addr(self.hi).wrapping_sub(addr(lo)) as isize {
+      let (lo, hi) = unsafe { alloc_chunk_for::<E>(layout, self.hi) }?;
+      self.lo = lo;
+      self.hi = hi;
+    } else {
+      self.lo = lo;
+    }
+
+    let p = unsafe { NonNull::new_unchecked(self.lo) };
+
+    self.lo = self.lo.wrapping_add(size);
+
+    Ok(p)
+  }
+
+  pub(crate) fn debug(&self, name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct(name)
+      .field("lo", &self.lo)
+      .field("hi", &self.hi)
+      .finish()
+  }
+}
+
+impl Drop for RawArena {
+  fn drop(&mut self) {
+    if let Some(p) = NonNull::new(self.hi) {
+      unsafe { dealloc_chunk_list(p) }
+    }
+  }
+}
 
 // SAFETY:
 //
@@ -38,18 +340,7 @@ unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
 unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
 
-// We make the `Allocator` and `Slot` types invariant with respect to their
-// associated lifetime. It would be ok to make them covariant, but that
-// shouldn't be necessary for any use case.
-
-type InvariantLifetime<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
-
-/// A failed allocation from the arena.
-
-#[derive(Debug)]
-pub struct AllocError;
-
-impl raw::Error for AllocError {
+impl RawError for AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
 
@@ -57,11 +348,10 @@ impl raw::Error for AllocError {
   fn layout_overflow() -> Self { Self }
 }
 
-enum Panicked {}
 
-impl Panicked {
+impl Void {
   #[inline(always)]
-  fn unwrap<T>(x: Result<T, Panicked>) -> T {
+  fn unwrap<T>(x: Result<T, Void>) -> T {
     match x {
       Ok(x) => x,
       Err(e) => match e {}
@@ -69,7 +359,7 @@ impl Panicked {
   }
 }
 
-impl raw::Error for Panicked {
+impl RawError for Void {
   #[inline(never)]
   #[cold]
   fn global_alloc_error(layout: Layout) -> Self {
@@ -95,7 +385,7 @@ impl Arena {
 
   #[inline(always)]
   pub fn new() -> Self {
-    Self(Allocator(raw::Arena::new(), PhantomData))
+    Self(Allocator(RawArena::new(), PhantomData))
   }
 
   /// Gets a handle with which to allocate objects from the arena. The lifetime
@@ -155,7 +445,7 @@ impl fmt::Debug for Allocator<'_> {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E: raw::Error>(&mut self) -> Result<Slot<'a, T>, E> {
+  fn gen_alloc<T, E: RawError>(&mut self) -> Result<Slot<'a, T>, E> {
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.cast();
 
@@ -172,7 +462,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E: raw::Error>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
+  fn gen_alloc_slice<T, E: RawError>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
 
@@ -204,7 +494,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E: raw::Error>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
+  fn gen_alloc_layout<E: RawError>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
     let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
@@ -222,7 +512,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_slice<T: Copy, E: raw::Error>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
+  fn gen_copy_slice<T: Copy, E: RawError>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
     // NB:
     //
     // - `Copy` implies `!Drop`.
@@ -260,7 +550,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_str<E: raw::Error>(&mut self, src: &str) -> Result<&'a mut str, E> {
+  fn gen_copy_str<E: RawError>(&mut self, src: &str) -> Result<&'a mut str, E> {
     let t = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
@@ -278,7 +568,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
-    Panicked::unwrap(self.gen_alloc())
+    Void::unwrap(self.gen_alloc())
   }
 
   /// Allocates memory for a single object.
@@ -301,7 +591,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
-    Panicked::unwrap(self.gen_alloc_slice(len))
+    Void::unwrap(self.gen_alloc_slice(len))
   }
 
   /// Allocates memory for a slice of the given length.
@@ -323,7 +613,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> Slot<'a, [u8]> {
-    Panicked::unwrap(self.gen_alloc_layout(layout))
+    Void::unwrap(self.gen_alloc_layout(layout))
   }
 
   /// Allocates memory for the given layout.
@@ -345,7 +635,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
-    Panicked::unwrap(self.gen_copy_slice(src))
+    Void::unwrap(self.gen_copy_slice(src))
   }
 
   /// Copies the slice into a new allocation.
@@ -367,7 +657,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
-    Panicked::unwrap(self.gen_copy_str(src))
+    Void::unwrap(self.gen_copy_str(src))
   }
 
   /// Copies the string into a new allocation.
