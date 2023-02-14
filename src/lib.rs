@@ -33,17 +33,23 @@ use core::str;
 
 /// An arena allocator.
 
-pub struct Arena(Allocator<'static>);
+#[derive(Debug)]
+pub struct Arena {
+  lo: *mut u8,
+  hi: *mut Footer,
+}
 
 /// A handle for allocating objects from an arena with a particular lifetime.
 
-pub struct Allocator<'a>(RawArena, InvariantLifetime<'a>);
+#[repr(transparent)]
+pub struct Allocator<'a>(Arena, InvariantLifetime<'a>);
 
 /// An uninitialized slot in the arena.
 ///
 /// Typically you will initialize the slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
 
+#[repr(transparent)]
 pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, InvariantLifetime<'a>);
 
 /// A failed allocation from the arena.
@@ -61,18 +67,13 @@ type InvariantLifetime<'a> = PhantomData<fn(&'a ()) -> &'a ()>;
 
 enum Void {}
 
-struct RawArena {
-  lo: *mut u8,
-  hi: *mut Footer,
-}
-
 struct Footer {
   layout: Layout,
   next: Option<NonNull<Footer>>,
   total_allocated: usize,
 }
 
-trait RawError {
+trait Error {
   fn global_alloc_error(_: Layout) -> Self;
   fn layout_overflow() -> Self;
 }
@@ -147,7 +148,7 @@ impl Void {
   }
 }
 
-impl RawError for Void {
+impl Error for Void {
   #[inline(never)]
   #[cold]
   fn global_alloc_error(layout: Layout) -> Self {
@@ -167,7 +168,7 @@ impl RawError for Void {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl RawError for AllocError {
+impl Error for AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
 
@@ -177,18 +178,18 @@ impl RawError for AllocError {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// RawArena
+// Arena
 //
 ////////////////////////////////////////////////////////////////////////////////
 
 // SAFETY:
 //
-// The `RawArena` type conforms to the usual shared xor mutable discipline,
+// The `Arena` type conforms to the usual shared xor mutable discipline,
 // despite containing pointers.
 
-unsafe impl Send for RawArena {}
+unsafe impl Send for Arena {}
 
-unsafe impl Sync for RawArena {}
+unsafe impl Sync for Arena {}
 
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
@@ -215,7 +216,7 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_chunk_for<E: RawError>
+unsafe fn alloc_chunk_for<E: Error>
   (
     object: Layout,
     chunks: *mut Footer
@@ -314,9 +315,12 @@ unsafe fn alloc_chunk_for<E: RawError>
   Ok((lo, hi))
 }
 
-impl RawArena {
+impl Arena {
+  /// Creates a new arena. This does not acquire any memory from the global
+  /// allocator.
+
   #[inline(always)]
-  pub(crate) fn new() -> Self {
+  pub fn new() -> Self {
     // NB:
     //
     // - `lo > hi` so there is no space for ZSTs.
@@ -328,7 +332,38 @@ impl RawArena {
     }
   }
 
-  pub(crate) fn reset(&mut self) {
+  /// Gets a handle with which to allocate objects from the arena. The lifetime
+  /// from this mutable borrow is propagated to those allocations.
+
+  #[inline(always)]
+  pub fn allocator(&mut self) -> &mut Allocator<'_> {
+    // SAFETY:
+    //
+    // Various allocation methods use unsafe code to create references from
+    // pointers.  For that code to be sound, it is necessary for every user
+    // accessible `Allocator<_>` to have an appropriately restricted lifetime
+    // parameter.
+
+    // SAFETY:
+    //
+    // The soundness of this cast depends on the fact that `Allocator` is
+    // `#[repr(transparent)]` with an `Arena` field.
+
+    unsafe { &mut *(self as *mut _ as *mut _) }
+  }
+
+  /// Deallocates all objects previously allocated from the arena. The arena
+  /// may release some, but not necessarily all, of its memory back to the
+  /// global allocator.
+
+  pub fn reset(&mut self) {
+    // SAFETY:
+    //
+    // Various allocation methods use unsafe code to create references from
+    // pointers.  For that code to be sound, it is necessary for calling this
+    // method to imply that any lifetime associated with an `Allocator<_>` has
+    // already ended.
+
     let hi = self.hi;
 
     if ! hi.is_null() {
@@ -344,7 +379,7 @@ impl RawArena {
   }
 
   #[inline(always)]
-  pub(crate) fn alloc<E: RawError>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
+  fn alloc<E: Error>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
     let size = layout.size();
     let align = layout.align();
 
@@ -365,7 +400,7 @@ impl RawArena {
     Ok(p)
   }
 
-  pub(crate) fn debug(&self, name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+  fn debug(&self, name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct(name)
       .field("lo", &self.lo)
       .field("hi", &self.hi)
@@ -373,62 +408,11 @@ impl RawArena {
   }
 }
 
-impl Drop for RawArena {
+impl Drop for Arena {
   fn drop(&mut self) {
     if let Some(p) = NonNull::new(self.hi) {
       unsafe { dealloc_chunk_list(p) }
     }
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// Arena
-//
-////////////////////////////////////////////////////////////////////////////////
-
-impl Arena {
-  /// Creates a new arena. This does not acquire any memory from the global
-  /// allocator.
-
-  #[inline(always)]
-  pub fn new() -> Self {
-    Self(Allocator(RawArena::new(), PhantomData))
-  }
-
-  /// Gets a handle with which to allocate objects from the arena. The lifetime
-  /// from this mutable borrow is propagated to those allocations.
-
-  #[inline(always)]
-  pub fn allocator(&mut self) -> &mut Allocator<'_> {
-    // SAFETY:
-    //
-    // Various allocation methods use unsafe code to create references from
-    // pointers.  For that code to be sound, it is necessary for every user
-    // accessible `Allocator<_>` to have an appropriately restricted lifetime
-    // parameter.
-
-    let p = &mut self.0;
-    let p = p as *mut _;
-    let p = p as *const _;
-    let p = p as *mut _;
-    unsafe { &mut *p }
-  }
-
-  /// Deallocates all objects previously allocated from the arena. The arena
-  /// may release some, but not necessarily all, of its memory back to the
-  /// global allocator.
-
-  #[inline(always)]
-  pub fn reset(&mut self) {
-    // SAFETY:
-    //
-    // Various allocation methods use unsafe code to create references from
-    // pointers.  For that code to be sound, it is necessary for calling this
-    // method to imply that any lifetime associated with an `Allocator<_>` has
-    // already ended.
-
-    self.0.0.reset()
   }
 }
 
@@ -439,27 +423,15 @@ impl Default for Arena {
   }
 }
 
-impl fmt::Debug for Arena {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.0.0.debug("Arena", f)
-  }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Allocator
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl fmt::Debug for Allocator<'_> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.0.debug("Allocator", f)
-  }
-}
-
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E: RawError>(&mut self) -> Result<Slot<'a, T>, E> {
+  fn gen_alloc<T, E: Error>(&mut self) -> Result<Slot<'a, T>, E> {
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.cast();
 
@@ -476,7 +448,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E: RawError>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
+  fn gen_alloc_slice<T, E: Error>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
 
@@ -508,7 +480,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E: RawError>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
+  fn gen_alloc_layout<E: Error>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
     let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
@@ -526,7 +498,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_slice<T: Copy, E: RawError>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
+  fn gen_copy_slice<T: Copy, E: Error>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
     // NB:
     //
     // - `Copy` implies `!Drop`.
@@ -564,7 +536,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_str<E: RawError>(&mut self, src: &str) -> Result<&'a mut str, E> {
+  fn gen_copy_str<E: Error>(&mut self, src: &str) -> Result<&'a mut str, E> {
     let t = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
@@ -683,6 +655,12 @@ impl<'a> Allocator<'a> {
   #[inline(always)]
   pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
     self.gen_copy_str(src)
+  }
+}
+
+impl fmt::Debug for Allocator<'_> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.debug("Allocator", f)
   }
 }
 
