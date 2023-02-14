@@ -53,7 +53,7 @@ pub struct AllocError;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// PRIVATE TYPE DEFINITIONS AND TRAITS
+// PRIVATE TYPE AND TRAIT DEFINITIONS
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -123,6 +123,56 @@ unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
   let p = p as *mut _;
   let p = p as *mut _;
   unsafe { &mut *p }
+}
+
+#[inline(never)]
+#[cold]
+fn panic_type_needs_drop() -> ! {
+  panic!("type needs drop")
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Void
+//
+////////////////////////////////////////////////////////////////////////////////
+
+impl Void {
+  #[inline(always)]
+  fn unwrap<T>(x: Result<T, Void>) -> T {
+    match x {
+      Ok(x) => x,
+      Err(e) => match e {}
+    }
+  }
+}
+
+impl RawError for Void {
+  #[inline(never)]
+  #[cold]
+  fn global_alloc_error(layout: Layout) -> Self {
+    alloc::alloc::handle_alloc_error(layout)
+  }
+
+  #[inline(never)]
+  #[cold]
+  fn layout_overflow() -> Self {
+    panic!("layout overflow")
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// AllocError
+//
+////////////////////////////////////////////////////////////////////////////////
+
+impl RawError for AllocError {
+  #[inline(always)]
+  fn global_alloc_error(_: Layout) -> Self { Self }
+
+  #[inline(always)]
+  fn layout_overflow() -> Self { Self }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -331,53 +381,11 @@ impl Drop for RawArena {
   }
 }
 
-// SAFETY:
+////////////////////////////////////////////////////////////////////////////////
 //
-// The `Slot` type conforms to the usual shared xor mutable discipline,
-// despite containing a pointer.
-
-unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
-
-unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
-
-impl RawError for AllocError {
-  #[inline(always)]
-  fn global_alloc_error(_: Layout) -> Self { Self }
-
-  #[inline(always)]
-  fn layout_overflow() -> Self { Self }
-}
-
-
-impl Void {
-  #[inline(always)]
-  fn unwrap<T>(x: Result<T, Void>) -> T {
-    match x {
-      Ok(x) => x,
-      Err(e) => match e {}
-    }
-  }
-}
-
-impl RawError for Void {
-  #[inline(never)]
-  #[cold]
-  fn global_alloc_error(layout: Layout) -> Self {
-    alloc::alloc::handle_alloc_error(layout)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn layout_overflow() -> Self {
-    panic!("layout overflow")
-  }
-}
-
-#[inline(never)]
-#[cold]
-fn panic_type_needs_drop() -> ! {
-  panic!("type needs drop")
-}
+// Arena
+//
+////////////////////////////////////////////////////////////////////////////////
 
 impl Arena {
   /// Creates a new arena. This does not acquire any memory from the global
@@ -436,6 +444,12 @@ impl fmt::Debug for Arena {
     self.0.0.debug("Arena", f)
   }
 }
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Allocator
+//
+////////////////////////////////////////////////////////////////////////////////
 
 impl fmt::Debug for Allocator<'_> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -671,6 +685,21 @@ impl<'a> Allocator<'a> {
     self.gen_copy_str(src)
   }
 }
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Slot
+//
+////////////////////////////////////////////////////////////////////////////////
+
+// SAFETY:
+//
+// The `Slot` type conforms to the usual shared xor mutable discipline,
+// despite containing a pointer.
+
+unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
+
+unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
 
 impl<'a, T: ?Sized> Slot<'a, T> {
   /// Converts the slot into a non-null pointer to its underlying memory.
