@@ -39,7 +39,7 @@ pub struct Arena {
   hi: *mut Footer,
 }
 
-/// A handle for allocating objects from an arena with a particular lifetime.
+/// A handle for allocating objects with a particular lifetime.
 
 #[repr(transparent)]
 pub struct Allocator<'a>(Arena, InvariantLifetime<'a>);
@@ -84,9 +84,15 @@ trait Error {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+#[cfg(not(test))]
+const MIN_CHUNK_SIZE_LOG2: usize = 12; // 4kb
+
+#[cfg(test)]
+const MIN_CHUNK_SIZE_LOG2: usize = 6; // 64b
+
 const FOOTER_SIZE: usize = size_of::<Footer>();
 const FOOTER_ALIGN: usize = align_of::<Footer>();
-const MIN_CHUNK_SIZE: usize = 1 << 16; // 64kb
+const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
 const MIN_CHUNK_ALIGN: usize = FOOTER_ALIGN;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -95,41 +101,27 @@ const MIN_CHUNK_ALIGN: usize = FOOTER_ALIGN;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-// feature strict_provenance - `core::ptr`
-
 #[inline(always)]
 fn invalid_mut<T>(addr: usize) -> *mut T {
   unsafe { core::mem::transmute(addr) }
 }
 
-// feature strict_provenance - method of `*const T`
-
 #[inline(always)]
-fn addr<T>(p: *const T) -> usize {
+fn addr<T: ?Sized>(p: *const T) -> usize {
+  let p = p as *const ();
   unsafe { core::mem::transmute(p) }
 }
 
-// feature ptr_mask - method of `*mut T`
-
 #[inline(always)]
-fn mask<T>(p: *mut T, mask: usize) -> *mut T {
-  let p = p as *mut u8;
-  p.wrapping_sub(addr(p) & ! mask) as *mut _
+fn mask(p: *mut u8, mask: usize) -> *mut u8 {
+  p.wrapping_sub(addr(p) & ! mask)
 }
-
-// feature slice_assume_init_mut - `core::mem::MaybeUninit`
 
 #[inline(always)]
 unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
   let p = p as *mut _;
   let p = p as *mut _;
   unsafe { &mut *p }
-}
-
-#[inline(never)]
-#[cold]
-fn panic_type_needs_drop() -> ! {
-  panic!("type needs drop")
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -202,14 +194,14 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // worst even without TCO.
 
   let p = p.as_ptr();
-  let t = unsafe { p.read() };
+  let f = unsafe { p.read() };
   let p = p as *mut u8;
   let p = p.wrapping_add(FOOTER_SIZE);
-  let p = p.wrapping_sub(t.layout.size());
+  let p = p.wrapping_sub(f.layout.size());
 
-  unsafe { alloc::alloc::dealloc(p, t.layout) }
+  unsafe { alloc::alloc::dealloc(p, f.layout) }
 
-  if let Some(p) = t.next {
+  if let Some(p) = f.next {
     unsafe { dealloc_chunk_list(p) }
   }
 }
@@ -305,12 +297,13 @@ unsafe fn alloc_chunk_for<E: Error>
   let hi = lo.wrapping_add(size).wrapping_sub(FOOTER_SIZE) as *mut Footer;
 
   let total_allocated = total_allocated.saturating_add(size);
+  let f = Footer { layout, next: chunks, total_allocated };
 
   // SAFETY:
   //
   // - `hi` is valid and aligned for writing a `Footer`.
 
-  unsafe { hi.write(Footer { layout, next: chunks, total_allocated }) };
+  unsafe { hi.write(f) };
 
   Ok((lo, hi))
 }
@@ -321,10 +314,11 @@ impl Arena {
 
   #[inline(always)]
   pub fn new() -> Self {
-    // NB:
+    // We initialize with `lo > hi` so there is no space for a zero-sized
+    // allocation.
     //
-    // - `lo > hi` so there is no space for ZSTs.
-    // - `hi - align_up(lo, MAX_ALIGN) == isize::MIN`.
+    // Also, `hi - align_up(lo, MAX_ALIGN) == isize::MIN`, so we don't
+    // underflow `isize` in the capacity calculation.
 
     Self {
       lo: invalid_mut(1),
@@ -344,12 +338,15 @@ impl Arena {
     // accessible `Allocator<_>` to have an appropriately restricted lifetime
     // parameter.
 
+    let p = self as *mut _;
+    let p = p as *mut _;
+
     // SAFETY:
     //
     // The soundness of this cast depends on the fact that `Allocator` is
     // `#[repr(transparent)]` with an `Arena` field.
 
-    unsafe { &mut *(self as *mut _ as *mut _) }
+    unsafe { &mut *p }
   }
 
   /// Deallocates all objects previously allocated from the arena. The arena
@@ -364,12 +361,13 @@ impl Arena {
     // method to imply that any lifetime associated with an `Allocator<_>` has
     // already ended.
 
-    let hi = self.hi;
+    let p = self.hi;
 
-    if ! hi.is_null() {
-      let f = unsafe { &mut *hi };
+    if ! p.is_null() {
+      let f = unsafe { &mut *p };
+      let p = p as *mut u8;
 
-      self.lo = (hi as *mut u8).wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
+      self.lo = p.wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
 
       if let Some(next) = f.next {
         f.next = None;
@@ -398,13 +396,6 @@ impl Arena {
     self.lo = self.lo.wrapping_add(size);
 
     Ok(p)
-  }
-
-  fn debug(&self, name: &str, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_struct(name)
-      .field("lo", &self.lo)
-      .field("hi", &self.hi)
-      .finish()
   }
 }
 
@@ -512,6 +503,7 @@ impl<'a> Allocator<'a> {
 
     let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr() as *mut _;
+    let q = src.as_ptr();
 
     // SAFETY:
     //
@@ -522,7 +514,7 @@ impl<'a> Allocator<'a> {
     // Note that the above holds, and in particular that the pointers are
     // non-null and aligned, even if we need to do a zero-byte read and write.
 
-    unsafe { ptr::copy_nonoverlapping(src.as_ptr(), p, len) };
+    unsafe { ptr::copy_nonoverlapping(q, p, len) };
 
     // SAFETY:
     //
@@ -537,13 +529,13 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   fn gen_copy_str<E: Error>(&mut self, src: &str) -> Result<&'a mut str, E> {
-    let t = self.gen_copy_slice(src.as_bytes())?;
+    let p = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
     //
     // The byte array is valid UTF-8 because `src` was valid UTF-8.
 
-    Ok(unsafe { str::from_utf8_unchecked_mut(t) })
+    Ok(unsafe { str::from_utf8_unchecked_mut(p) })
   }
 
   /// Allocates memory for a single object.
@@ -660,7 +652,10 @@ impl<'a> Allocator<'a> {
 
 impl fmt::Debug for Allocator<'_> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.0.debug("Allocator", f)
+    f.debug_struct("Allocator")
+      .field("lo", &self.0.lo)
+      .field("hi", &self.0.hi)
+      .finish()
   }
 }
 
@@ -669,6 +664,12 @@ impl fmt::Debug for Allocator<'_> {
 // Slot
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+#[inline(never)]
+#[cold]
+fn panic_type_needs_drop() -> ! {
+  panic!("type needs drop")
+}
 
 // SAFETY:
 //

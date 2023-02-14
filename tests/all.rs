@@ -7,6 +7,12 @@ use oxcart::Allocator;
 use oxcart::Arena;
 use oxcart::Slot;
 
+#[inline(always)]
+fn addr<T: ?Sized>(p: *const T) -> usize {
+  let p = p as *const();
+  unsafe { core::mem::transmute(p) }
+}
+
 #[test]
 fn test_api() {
   let mut arena = Arena::new();
@@ -75,8 +81,7 @@ fn test_alignment() {
   for align in [1, 2, 4, 8, 16, 32, 64] {
     let layout = Layout::from_size_align(1, align).unwrap();
     let p = allocator.alloc_layout(layout).as_ptr();
-    let p = unsafe { core::mem::transmute::<_, usize>(p as *mut u8) };
-    assert!(p & (align - 1) == 0);
+    assert!(addr(p) & (align - 1) == 0);
   }
 }
 
