@@ -20,21 +20,22 @@ arena.reset();
 
 ## Features
 
-- fast
-- allocates objects of multiple types
-- allocates slices, strings, and arbitrary layouts
-- supports `reset`-ing and reusing an arena
-- separates allocation from initialization to avoid stack spills
-- sound
-- compatible with strict provenance
-- zero-dependency
+- speed
+- allocation of objects with multiple types
+- allocation of slices, strings, and arbitrary layouts
+- allocation separated from initialization to avoid stack spills
+- reuse of memory after `reset`-ing an arena
+- soundness
+- compatibility with strict provenance
+- zero dependencies
 
 ## Non-Features
 
 - no allocation through an immutable reference
-- no nested stack of regions
 - no `drop` calls for objects upon arena `reset` or `drop`
 - no `allocator_api` integration
+- no nested stack of regions
+- no support for custom DSTs
 
 ## License
  
