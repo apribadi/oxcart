@@ -33,6 +33,8 @@ fn test_api() {
   let _ = allocator.alloc::<u64>().as_ptr();
   let _ = allocator.alloc::<u64>().as_uninit();
   let _ = allocator.alloc::<u64>().init(13);
+  let _ = allocator.alloc::<[u64; 5]>().as_uninit_array();
+  let _ = allocator.alloc::<[u64; 5]>().init_array(|i| i as u64);
   let _ = allocator.alloc_slice::<u64>(5).len();
   let _ = allocator.alloc_slice::<u64>(5).as_uninit_slice();
   let _ = allocator.alloc_slice::<u64>(5).init_slice(|i| i as u64);
@@ -40,6 +42,7 @@ fn test_api() {
   let _ = format!("{:?}", Arena::new());
   let _ = format!("{:?}", Arena::new().allocator());
   let _ = format!("{:?}", AllocError);
+  let _ = format!("{:?}", Arena::new().allocator().alloc::<u64>());
 }
 
 #[test]

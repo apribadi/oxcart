@@ -117,13 +117,6 @@ fn mask(p: *mut u8, mask: usize) -> *mut u8 {
   p.wrapping_sub(addr(p) & ! mask)
 }
 
-#[inline(always)]
-unsafe fn slice_assume_init_mut<T>(p: &mut [MaybeUninit<T>]) -> &mut [T] {
-  let p = p as *mut _;
-  let p = p as *mut _;
-  unsafe { &mut *p }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Void
@@ -309,7 +302,7 @@ unsafe fn alloc_chunk_for<E: Error>
 }
 
 impl Arena {
-  /// Creates a new arena. This does not acquire any memory from the global
+  /// Creates a new arena. It does not yet request any memory from the global
   /// allocator.
 
   #[inline(always)]
@@ -455,7 +448,8 @@ impl<'a> Allocator<'a> {
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr() as *mut _;
+    let p = p.as_ptr();
+    let p = p as *mut _;
     let p = ptr::slice_from_raw_parts_mut(p, len);
 
     // SAFETY:
@@ -497,12 +491,13 @@ impl<'a> Allocator<'a> {
 
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
-    let len = src.len();
-    let size = size_of_element * len;
+    let n = src.len();
+    let size = size_of_element * n;
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
     let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr() as *mut _;
+    let p = p.as_ptr();
+    let p = p as *mut _;
     let q = src.as_ptr();
 
     // SAFETY:
@@ -514,7 +509,7 @@ impl<'a> Allocator<'a> {
     // Note that the above holds, and in particular that the pointers are
     // non-null and aligned, even if we need to do a zero-byte read and write.
 
-    unsafe { ptr::copy_nonoverlapping(q, p, len) };
+    unsafe { ptr::copy_nonoverlapping(q, p, n) };
 
     // SAFETY:
     //
@@ -524,7 +519,7 @@ impl<'a> Allocator<'a> {
     // - The memory is live for the duration of the assigned lifetime.
     // - The memory is initialized.
 
-    Ok(unsafe { slice::from_raw_parts_mut(p, len) })
+    Ok(unsafe { slice::from_raw_parts_mut(p, n) })
   }
 
   #[inline(always)]
@@ -668,7 +663,7 @@ impl fmt::Debug for Allocator<'_> {
 #[inline(never)]
 #[cold]
 fn panic_type_needs_drop() -> ! {
-  panic!("type needs drop")
+  panic!("cannot initialize arena slot with a type that needs drop")
 }
 
 // SAFETY:
@@ -679,6 +674,14 @@ fn panic_type_needs_drop() -> ! {
 unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
 unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+
+impl<'a, T> fmt::Debug for Slot<'a, T> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_tuple("Slot")
+      .field(&self.0)
+      .finish()
+  }
+}
 
 impl<'a, T: ?Sized> Slot<'a, T> {
   /// Converts the slot into a non-null pointer to its underlying memory.
@@ -703,7 +706,8 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = self.0.as_ptr() as *mut _;
+    let p = self.0.as_ptr();
+    let p = p as *mut _;
 
     // SAFETY:
     //
@@ -728,6 +732,54 @@ impl<'a, T> Slot<'a, T> {
   }
 }
 
+impl<'a, T, const N: usize> Slot<'a, [T; N]> {
+  /// Converts the slot into a reference to an array of uninitialized values.
+
+  #[inline(always)]
+  pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
+    let p = self.0.as_ptr();
+    let p = p as *mut _;
+
+    // SAFETY:
+    //
+    // The pointed-to memory is valid for an array of `T`s, though
+    // uninitialized.
+
+    unsafe { &mut *p }
+  }
+
+  /// Initializes the array with values produced by calling the given function
+  /// with each index in order.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
+
+  #[inline(always)]
+  pub fn init_array<F: FnMut(usize) -> T>(self, f: F) -> &'a mut [T; N] {
+    if needs_drop::<T>() {
+      panic_type_needs_drop();
+    }
+
+    let mut f = f;
+
+    let p = self.as_uninit_array();
+
+    for (i, elt) in p.iter_mut().enumerate() {
+      let _: _ = elt.write(f(i));
+    }
+
+    let p = p as *mut _;
+    let p = p as *mut _;
+
+    // SAFETY:
+    //
+    // Every array element has been initialized.
+
+    unsafe { &mut *p }
+  }
+}
+
 impl<'a, T> Slot<'a, [T]> {
   /// The length of the slice (in items, not bytes) occupying the slot.
 
@@ -741,7 +793,8 @@ impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     let n = self.0.len();
-    let p = self.0.as_ptr() as *mut _;
+    let p = self.0.as_ptr();
+    let p = p as *mut _;
 
     // SAFETY:
     //
@@ -772,10 +825,13 @@ impl<'a, T> Slot<'a, [T]> {
       let _: _ = elt.write(f(i));
     }
 
+    let p = p as *mut _;
+    let p = p as *mut _;
+
     // SAFETY:
     //
     // Every slice element has been initialized.
 
-    unsafe { slice_assume_init_mut(p) }
+    unsafe { &mut *p }
   }
 }
