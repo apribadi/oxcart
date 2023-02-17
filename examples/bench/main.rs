@@ -1,21 +1,18 @@
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
+mod list;
+
 use std::time::Instant;
 use std::hint;
+use crate::list::List;
+use crate::list::Node;
 
 // mod intmap;
+
 
 const ITERS: usize = 10_000;
 const LEN: usize = 10_000;
 // const LEN: usize = 1_000;
-
-type List<'a, T> = Option<&'a Node<'a, T>>;
-
-#[derive(Clone, Copy)]
-struct Node<'a, T> {
-  #[allow(dead_code)]
-  car: T,
-  #[allow(dead_code)]
-  cdr: Option<&'a Node<'a, T>>,
-}
 
 struct NodeWithKey<K, T> {
   #[allow(dead_code)]
@@ -47,9 +44,9 @@ fn run_bench<F: FnOnce(usize, usize)>(name: &str, f: F) {
 fn bench_oxcart(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(allocator.alloc().init(Node { car: i as u64, cdr: r }));
+      r = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: r }));
     }
     r
   }
@@ -70,7 +67,7 @@ fn bench_oxcart_noinline(iters: usize, len: usize) {
     (
       allocator: &mut oxcart::Allocator<'a>,
       car: u64,
-      cdr: Option<&'a Node<'a, u64>>
+      cdr: List<'a, u64>,
     ) -> &'a mut Node<'a, u64>
   {
     allocator.alloc().init(Node { car, cdr })
@@ -78,9 +75,9 @@ fn bench_oxcart_noinline(iters: usize, len: usize) {
 
   #[inline(never)]
   fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(make_node(allocator, i as u64, r));
+      r = List::Cons(make_node(allocator, i as u64, r));
     }
     r
   }
@@ -98,9 +95,9 @@ fn bench_oxcart_noinline(iters: usize, len: usize) {
 fn bench_bumpalo(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
+      r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
@@ -120,7 +117,7 @@ fn bench_bumpalo_noinline(iters: usize, len: usize) {
     (
       arena: &'a bumpalo::Bump,
       car: u64,
-      cdr: Option<&'a Node<'a, u64>>
+      cdr: List<'a, u64>,
     ) -> &'a mut Node<'a, u64>
   {
     arena.alloc(Node { car, cdr })
@@ -128,9 +125,9 @@ fn bench_bumpalo_noinline(iters: usize, len: usize) {
 
   #[inline(never)]
   fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(make_node(arena, i as u64, r));
+      r = List::Cons(make_node(arena, i as u64, r));
     }
     r
   }
@@ -147,9 +144,9 @@ fn bench_bumpalo_noinline(iters: usize, len: usize) {
 fn bench_typed_arena(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(arena: &'a typed_arena::Arena<Node<'a, u64>>, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
+      r = List::Cons(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
@@ -164,9 +161,9 @@ fn bench_typed_arena(iters: usize, len: usize) {
 fn bench_copy_arena(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(allocator: &'a mut copy_arena::Allocator<'a>, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(allocator.alloc(Node { car: i as u64, cdr: r }));
+      r = List::Cons(allocator.alloc(Node { car: i as u64, cdr: r }));
     }
     r
   }
@@ -254,9 +251,9 @@ fn bench_slab(iters: usize, len: usize) {
 fn bench_box_leak(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(Box::leak(Box::new(Node { car: i as u64, cdr: r })));
+      r = List::Cons(Box::leak(Box::new(Node { car: i as u64, cdr: r })));
     }
     r
   }
@@ -268,12 +265,12 @@ fn bench_box_leak(iters: usize, len: usize) {
 
 #[cfg(feature = "allocator_api")]
 #[inline(never)]
-fn bench_allocator_api(iters: usize, len: usize) {
+fn bench_allocator_api_oxcart(iters: usize, len: usize) {
   #[inline(never)]
-  fn make_list<'a>(allocator: &oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
-    let mut r: List<'a, u64> = None;
+  fn make_list<'a>(allocator: &'a oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
+    let mut r = List::Nil;
     for i in (0 .. len).rev() {
-      r = Some(Box::leak(Box::new_in(Node { car: i as u64, cdr: r }, allocator)));
+      r = List::Cons(Box::leak(Box::new_in(Node { car: i as u64, cdr: r }, allocator)));
     }
     r
   }
@@ -282,7 +279,7 @@ fn bench_allocator_api(iters: usize, len: usize) {
 
   for _ in 0 .. iters {
     let allocator = arena.allocator();
-    let _: List<_> = hint::black_box(make_list(len), allocator);
+    let _: List<_> = hint::black_box(make_list(allocator, len));
     arena.reset();
   }
 }
@@ -366,5 +363,5 @@ fn main() {
   run_bench("box-leak", bench_box_leak);
 
   #[cfg(feature = "allocator_api")]
-  run_bench("allocator_api", bench_allocator_api);
+  run_bench("allocator_api_oxcart", bench_allocator_api_oxcart);
 }

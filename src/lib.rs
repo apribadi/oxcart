@@ -170,12 +170,11 @@ impl Error for ArenaError {
 
 // SAFETY:
 //
-// The `Arena` type conforms to the usual shared xor mutable discipline,
-// despite containing pointers.
+// ???
+//
+// Note that `Arena` can use interior mutability, so it is not `Sync`.
 
-// unsafe impl Send for Arena {}
-
-// unsafe impl Sync for Arena {}
+unsafe impl Send for Arena {}
 
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
@@ -401,6 +400,7 @@ impl Arena {
     Ok(r)
   }
 
+  #[cfg(feature = "allocator_api")]
   #[inline(always)]
   fn alloc_shared<E: Error>(&self, layout: Layout) -> Result<NonNull<u8>, E> {
     let size = layout.size();
@@ -719,9 +719,9 @@ fn panic_type_needs_drop() -> ! {
 // The `Slot` type conforms to the usual shared xor mutable discipline,
 // despite containing a pointer.
 
-// unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
+unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
-// unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
 
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
