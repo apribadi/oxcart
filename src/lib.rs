@@ -209,12 +209,14 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_chunk_for<E: FromError>
+unsafe fn alloc_chunk_for<E>
   (
     object: Layout,
     chunks: *mut Footer
   )
   -> Result<(*mut u8, *mut Footer), E>
+where
+  E: FromError
 {
   // SAFETY:
   //
@@ -382,7 +384,10 @@ impl Arena {
   }
 
   #[inline(always)]
-  fn alloc<E: FromError>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
+  fn alloc<E>(&mut self, layout: Layout) -> Result<NonNull<u8>, E>
+  where
+    E: FromError
+  {
     let size = layout.size();
     let align = layout.align();
 
@@ -413,7 +418,10 @@ impl Arena {
 
   #[cfg(feature = "allocator_api")]
   #[inline(always)]
-  fn alloc_shared<E: FromError>(&self, layout: Layout) -> Result<NonNull<u8>, E> {
+  fn alloc_shared<E>(&self, layout: Layout) -> Result<NonNull<u8>, E>
+  where
+    E: FromError
+  {
     let size = layout.size();
     let align = layout.align();
 
@@ -474,7 +482,10 @@ impl fmt::Debug for Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E: FromError>(&mut self) -> Result<Slot<'a, T>, E> {
+  fn gen_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
+  where
+    E: FromError
+  {
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.cast();
 
@@ -491,7 +502,10 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E: FromError>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
+  fn gen_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E>
+  where
+    E: FromError
+  {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
 
@@ -524,7 +538,10 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E: FromError>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
+  fn gen_alloc_layout<E>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E>
+  where
+    E: FromError
+  {
     let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
@@ -542,7 +559,11 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_slice<T: Copy, E: FromError>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
+  fn gen_copy_slice<T, E>(&mut self, src: &[T]) -> Result<&'a mut [T], E>
+  where
+    T: Copy,
+    E: FromError
+  {
     // NB:
     //
     // - `Copy` implies `!Drop`.
@@ -582,7 +603,10 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_str<E: FromError>(&mut self, src: &str) -> Result<&'a mut str, E> {
+  fn gen_copy_str<E>(&mut self, src: &str) -> Result<&'a mut str, E>
+  where
+    E: FromError
+  {
     let p = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
@@ -666,7 +690,10 @@ impl<'a> Allocator<'a> {
   /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
+  pub fn copy_slice<T>(&mut self, src: &[T]) -> &'a mut [T]
+  where
+    T: Copy
+  {
     Void::unwrap(self.gen_copy_slice(src))
   }
 
@@ -677,7 +704,10 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError> {
+  pub fn try_copy_slice<T>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError>
+  where
+    T: Copy
+  {
     self.gen_copy_slice(src)
   }
 
@@ -730,9 +760,9 @@ fn panic_type_needs_drop() -> ! {
 // The `Slot` type conforms to the usual shared xor mutable discipline,
 // despite containing a pointer.
 
-unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
+unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized + Send {}
 
-unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized + Sync {}
 
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -742,7 +772,10 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
   }
 }
 
-impl<'a, T: ?Sized> Slot<'a, T> {
+impl<'a, T> Slot<'a, T>
+where
+  T: ?Sized
+{
   /// Converts the slot into a non-null pointer to its underlying memory.
   ///
   /// The pointer is properly aligned.
@@ -815,7 +848,10 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   /// Panics if `T` implements [`Drop`].
 
   #[inline(always)]
-  pub fn init_array<F: FnMut(usize) -> T>(self, f: F) -> &'a mut [T; N] {
+  pub fn init_array<F>(self, f: F) -> &'a mut [T; N]
+  where
+    F: FnMut(usize) -> T
+  {
     if needs_drop::<T>() {
       panic_type_needs_drop();
     }
@@ -871,7 +907,10 @@ impl<'a, T> Slot<'a, [T]> {
   /// Panics if `T` implements [`Drop`].
 
   #[inline(always)]
-  pub fn init_slice<F: FnMut(usize) -> T>(self, f: F) -> &'a mut [T] {
+  pub fn init_slice<F>(self, f: F) -> &'a mut [T]
+  where
+    F: FnMut(usize) -> T
+  {
     if needs_drop::<T>() {
       panic_type_needs_drop();
     }

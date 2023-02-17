@@ -4,7 +4,9 @@ use expect_test::expect;
 use core::alloc::Layout;
 use core::fmt;
 use core::mem::size_of;
+use oxcart::Allocator;
 use oxcart::Arena;
+use oxcart::Slot;
 
 #[inline(always)]
 fn addr<T: ?Sized>(p: *const T) -> usize {
@@ -108,20 +110,21 @@ fn test_multiple_allocators_without_reset() {
   let _ = allocator.alloc().init(3);
 }
 
-/*
 #[test]
 fn test_types_are_send_and_sync() {
-  fn is_send_sync<T: Send + Sync>(_ : &T) {}
+  fn is_send<T: Send>(_ : &T) {}
+  fn is_sync<T: Sync>(_ : &T) {}
   let mut arena = Arena::new();
-  is_send_sync::<Arena>(&arena);
+  is_send::<Arena>(&arena);
   let allocator = arena.allocator();
-  is_send_sync::<Allocator>(allocator);
+  is_send::<Allocator>(allocator);
   let x = allocator.alloc::<u64>();
   let y = allocator.alloc_slice::<u64>(5);
-  is_send_sync::<Slot<_>>(&x);
-  is_send_sync::<Slot<_>>(&y);
+  is_send::<Slot<_>>(&x);
+  is_sync::<Slot<_>>(&x);
+  is_send::<Slot<_>>(&y);
+  is_sync::<Slot<_>>(&y);
 }
-*/
 
 #[test]
 fn test_linked_list() {
