@@ -219,7 +219,6 @@ fn bench_allocator_api_oxcart(iters: usize, len: usize) {
   }
 }
 
-/*
 #[inline(never)]
 fn bench_intmap_oxcart(iters: usize, len: usize) {
   #[inline(never)]
@@ -274,30 +273,22 @@ fn bench_intmap_bumpalo(iters: usize, len: usize) {
     arena.reset();
   }
 }
-*/
-
 
 fn main() {
-  /*
   warmup();
 
-  run_bench("intmap-oxcart", bench_intmap_oxcart);
-  run_bench("intmap-bumpalo", bench_intmap_bumpalo);
-  */
-  warmup();
-
-  run_bench(10_000, 10_000, "oxcart", bench_oxcart);
-  run_bench(10_000, 10_000, "bumpalo", bench_bumpalo);
-  run_bench(10_000, 10_000, "typed-arena", bench_typed_arena);
-  run_bench(10_000, 10_000, "copy_arena", bench_copy_arena);
-  run_bench(10_000, 10_000, "slotmap", bench_slotmap);
-  run_bench(10_000, 10_000, "generational_arena", bench_generational_arena);
-  run_bench(10_000, 10_000, "slab", bench_slab);
-  run_bench(10_000, 10_000, "box-leak", bench_box_leak);
+  run_bench(5_000, 5_000, "oxcart", bench_oxcart);
+  run_bench(5_000, 5_000, "bumpalo", bench_bumpalo);
+  run_bench(5_000, 5_000, "typed-arena", bench_typed_arena);
+  run_bench(5_000, 5_000, "copy_arena", bench_copy_arena);
+  run_bench(5_000, 5_000, "slotmap", bench_slotmap);
+  run_bench(5_000, 5_000, "generational_arena", bench_generational_arena);
+  run_bench(5_000, 5_000, "slab", bench_slab);
+  run_bench(5_000, 5_000, "box-leak", bench_box_leak);
 
   #[cfg(feature = "allocator_api")]
-  run_bench(10_000, 10_000, "allocator_api_oxcart", bench_allocator_api_oxcart);
+  run_bench(5_000, 5_000, "allocator_api_oxcart", bench_allocator_api_oxcart);
 
-  let _ = foo(oxcart::Arena::new().allocator());
-  let _ = bar(&bumpalo::Bump::new());
+  run_bench(5_000, 1_000, "intmap-oxcart", bench_intmap_oxcart);
+  run_bench(5_000, 1_000, "intmap-bumpalo", bench_intmap_bumpalo);
 }
