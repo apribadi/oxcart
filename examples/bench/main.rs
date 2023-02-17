@@ -8,10 +8,6 @@ use std::hint;
 use crate::list::List;
 use crate::list::Node;
 
-const ITERS: usize = 10_000;
-const LEN: usize = 10_000;
-// const LEN: usize = 1_000;
-
 struct NodeWithKey<K, T> {
   #[allow(dead_code)]
   car: T,
@@ -32,9 +28,11 @@ fn timeit<F: FnOnce()>(f: F) -> f64 {
   stop.saturating_duration_since(start).as_nanos() as f64
 }
 
-fn run_bench<F: FnOnce(usize, usize)>(name: &str, f: F) {
-  let duration = timeit(|| f(hint::black_box(ITERS), hint::black_box(LEN)));
-  let duration = duration / ((ITERS * LEN) as f64);
+fn run_bench<F: FnOnce(usize, usize)>(iters: usize, len: usize, name: &str, f: F) {
+  let iters = hint::black_box(iters);
+  let len = hint::black_box(len);
+  let duration = timeit(|| f(iters, len));
+  let duration = duration / ((iters * len) as f64);
   print!("{:25} {:.3} ns\n", name, duration);
 }
 
@@ -45,37 +43,6 @@ fn bench_oxcart(iters: usize, len: usize) {
     let mut r = List::Nil;
     for i in (0 .. len).rev() {
       r = List::Cons(allocator.alloc().init(Node { car: i as u64, cdr: r }));
-    }
-    r
-  }
-
-  let mut arena = oxcart::Arena::new();
-
-  for _ in 0 .. iters {
-    let allocator = arena.allocator();
-    let _: _ = hint::black_box(make_list(allocator, len));
-    arena.reset();
-  }
-}
-
-#[inline(never)]
-fn bench_oxcart_noinline(iters: usize, len: usize) {
-  #[inline(never)]
-  fn make_node<'a>
-    (
-      allocator: &mut oxcart::Allocator<'a>,
-      car: u64,
-      cdr: List<'a, u64>,
-    ) -> &'a mut Node<'a, u64>
-  {
-    allocator.alloc().init(Node { car, cdr })
-  }
-
-  #[inline(never)]
-  fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
-    let mut r = List::Nil;
-    for i in (0 .. len).rev() {
-      r = List::Cons(make_node(allocator, i as u64, r));
     }
     r
   }
@@ -104,36 +71,6 @@ fn bench_bumpalo(iters: usize, len: usize) {
 
   for _ in 0 .. iters {
     let _: List<_> = hint::black_box(make_list(&arena, len));
-    arena.reset();
-  }
-}
-
-#[inline(never)]
-fn bench_bumpalo_noinline(iters: usize, len: usize) {
-  #[inline(never)]
-  fn make_node<'a>
-    (
-      arena: &'a bumpalo::Bump,
-      car: u64,
-      cdr: List<'a, u64>,
-    ) -> &'a mut Node<'a, u64>
-  {
-    arena.alloc(Node { car, cdr })
-  }
-
-  #[inline(never)]
-  fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
-    let mut r = List::Nil;
-    for i in (0 .. len).rev() {
-      r = List::Cons(make_node(arena, i as u64, r));
-    }
-    r
-  }
-
-  let mut arena = bumpalo::Bump::new();
-
-  for _ in 0 .. iters {
-    let _: _ = hint::black_box(make_list(&arena, len));
     arena.reset();
   }
 }
@@ -349,17 +286,18 @@ fn main() {
   */
   warmup();
 
-  run_bench("oxcart", bench_oxcart);
-  run_bench("oxcart-noinline", bench_oxcart_noinline);
-  run_bench("bumpalo", bench_bumpalo);
-  run_bench("bumpalo-noinline", bench_bumpalo_noinline);
-  run_bench("typed-arena", bench_typed_arena);
-  run_bench("copy_arena", bench_copy_arena);
-  run_bench("slotmap", bench_slotmap);
-  run_bench("generational_arena", bench_generational_arena);
-  run_bench("slab", bench_slab);
-  run_bench("box-leak", bench_box_leak);
+  run_bench(10_000, 10_000, "oxcart", bench_oxcart);
+  run_bench(10_000, 10_000, "bumpalo", bench_bumpalo);
+  run_bench(10_000, 10_000, "typed-arena", bench_typed_arena);
+  run_bench(10_000, 10_000, "copy_arena", bench_copy_arena);
+  run_bench(10_000, 10_000, "slotmap", bench_slotmap);
+  run_bench(10_000, 10_000, "generational_arena", bench_generational_arena);
+  run_bench(10_000, 10_000, "slab", bench_slab);
+  run_bench(10_000, 10_000, "box-leak", bench_box_leak);
 
   #[cfg(feature = "allocator_api")]
-  run_bench("allocator_api_oxcart", bench_allocator_api_oxcart);
+  run_bench(10_000, 10_000, "allocator_api_oxcart", bench_allocator_api_oxcart);
+
+  let _ = foo(oxcart::Arena::new().allocator());
+  let _ = bar(&bumpalo::Bump::new());
 }
