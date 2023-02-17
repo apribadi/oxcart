@@ -1,5 +1,7 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
 #![deny(unsafe_op_in_unsafe_fn)]
 #![warn(elided_lifetimes_in_paths)]
 #![warn(missing_docs)]
@@ -13,6 +15,7 @@
 extern crate alloc;
 
 use core::alloc::Layout;
+use core::cell::Cell;
 use core::cmp::max;
 use core::fmt;
 use core::marker::PhantomData;
@@ -33,10 +36,9 @@ use core::str;
 
 /// An arena allocator.
 
-#[derive(Debug)]
 pub struct Arena {
-  lo: *mut u8,
-  hi: *mut Footer,
+  lo: Cell<*mut u8>,
+  hi: Cell<*mut Footer>,
 }
 
 /// A handle for allocating objects with a particular lifetime.
@@ -54,8 +56,7 @@ pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, InvariantLifetime<'a>);
 
 /// A failed allocation from the arena.
 
-#[derive(Debug)]
-pub struct AllocError;
+pub struct ArenaError;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -149,11 +150,11 @@ impl Error for Void {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// AllocError
+// ArenaError
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl Error for AllocError {
+impl Error for ArenaError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
 
@@ -172,9 +173,9 @@ impl Error for AllocError {
 // The `Arena` type conforms to the usual shared xor mutable discipline,
 // despite containing pointers.
 
-unsafe impl Send for Arena {}
+// unsafe impl Send for Arena {}
 
-unsafe impl Sync for Arena {}
+// unsafe impl Sync for Arena {}
 
 unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // SAFETY:
@@ -314,8 +315,8 @@ impl Arena {
     // underflow `isize` in the capacity calculation.
 
     Self {
-      lo: invalid_mut(1),
-      hi: invalid_mut(0),
+      lo: Cell::new(invalid_mut(1)),
+      hi: Cell::new(invalid_mut(0)),
     }
   }
 
@@ -354,13 +355,14 @@ impl Arena {
     // method to imply that any lifetime associated with an `Allocator<_>` has
     // already ended.
 
-    let p = self.hi;
+    let p = self.hi.get();
 
     if ! p.is_null() {
       let f = unsafe { &mut *p };
       let p = p as *mut u8;
+      let p = p.wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
 
-      self.lo = p.wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
+      self.lo.set(p);
 
       if let Some(next) = f.next {
         f.next = None;
@@ -374,27 +376,64 @@ impl Arena {
     let size = layout.size();
     let align = layout.align();
 
-    let lo = mask(self.lo.wrapping_add(align - 1), ! (align - 1));
+    let lo = self.lo.get_mut();
+    let hi = self.hi.get_mut();
 
-    if size as isize > addr(self.hi).wrapping_sub(addr(lo)) as isize {
-      let (lo, hi) = unsafe { alloc_chunk_for::<E>(layout, self.hi) }?;
-      self.lo = lo;
-      self.hi = hi;
+    let p = *lo;
+    let q = *hi;
+
+    let p = mask(p.wrapping_add(align - 1), ! (align - 1));
+
+    if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
+      let (p, q) = unsafe { alloc_chunk_for::<E>(layout, q) }?;
+      *lo = p;
+      *hi = q;
     } else {
-      self.lo = lo;
+      *lo = p;
     }
 
-    let p = unsafe { NonNull::new_unchecked(self.lo) };
+    let p = *lo;
+    let r = unsafe { NonNull::new_unchecked(p) };
+    let p = p.wrapping_add(size);
 
-    self.lo = self.lo.wrapping_add(size);
+    *lo = p;
 
-    Ok(p)
+    Ok(r)
+  }
+
+  #[inline(always)]
+  fn alloc_shared<E: Error>(&self, layout: Layout) -> Result<NonNull<u8>, E> {
+    let size = layout.size();
+    let align = layout.align();
+
+    let p = self.lo.get();
+    let q = self.hi.get();
+
+    let p = mask(p.wrapping_add(align - 1), ! (align - 1));
+
+    if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
+      let (p, q) = unsafe { alloc_chunk_for::<E>(layout, q) }?;
+      self.lo.set(p);
+      self.hi.set(q);
+    } else {
+      self.lo.set(p);
+    }
+
+    let p = self.lo.get();
+    let r = unsafe { NonNull::new_unchecked(p) };
+    let p = p.wrapping_add(size);
+
+    self.lo.set(p);
+
+    Ok(r)
   }
 }
 
 impl Drop for Arena {
   fn drop(&mut self) {
-    if let Some(p) = NonNull::new(self.hi) {
+    let p = self.hi.get();
+
+    if let Some(p) = NonNull::new(p) {
       unsafe { dealloc_chunk_list(p) }
     }
   }
@@ -404,6 +443,15 @@ impl Default for Arena {
   #[inline(always)]
   fn default() -> Self {
     Self::new()
+  }
+}
+
+impl fmt::Debug for Arena {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_struct("Arena")
+      .field("lo", &self.lo.get())
+      .field("hi", &self.hi.get())
+      .finish()
   }
 }
 
@@ -552,7 +600,7 @@ impl<'a> Allocator<'a> {
 
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, ArenaError> {
     self.gen_alloc()
   }
 
@@ -574,7 +622,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, ArenaError> {
     self.gen_alloc_slice(len)
   }
 
@@ -596,7 +644,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, AllocError> {
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, ArenaError> {
     self.gen_alloc_layout(layout)
   }
 
@@ -618,7 +666,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError> {
+  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], ArenaError> {
     self.gen_copy_slice(src)
   }
 
@@ -640,7 +688,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
+  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, ArenaError> {
     self.gen_copy_str(src)
   }
 }
@@ -648,8 +696,8 @@ impl<'a> Allocator<'a> {
 impl fmt::Debug for Allocator<'_> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_struct("Allocator")
-      .field("lo", &self.0.lo)
-      .field("hi", &self.0.hi)
+      .field("lo", &self.0.lo.get())
+      .field("hi", &self.0.hi.get())
       .finish()
   }
 }
@@ -671,9 +719,9 @@ fn panic_type_needs_drop() -> ! {
 // The `Slot` type conforms to the usual shared xor mutable discipline,
 // despite containing a pointer.
 
-unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
+// unsafe impl<'a, T: ?Sized + Send> Send for Slot<'a, T> {}
 
-unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
+// unsafe impl<'a, T: ?Sized + Sync> Sync for Slot<'a, T> {}
 
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -833,5 +881,33 @@ impl<'a, T> Slot<'a, [T]> {
     // Every slice element has been initialized.
 
     unsafe { &mut *p }
+  }
+}
+
+#[cfg(feature = "allocator_api")]
+impl Error for alloc::alloc::AllocError {
+  #[inline(always)]
+  fn global_alloc_error(_: Layout) -> Self { Self {} }
+
+  #[inline(always)]
+  fn layout_overflow() -> Self { Self {} }
+}
+
+#[cfg(feature = "allocator_api")]
+unsafe impl<'a> alloc::alloc::Allocator for Allocator<'a> {
+  #[inline(always)]
+  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, alloc::alloc::AllocError> {
+    let p = self.0.alloc_shared::<alloc::alloc::AllocError>(layout)?;
+    let p = p.as_ptr();
+    let p = ptr::slice_from_raw_parts_mut(p, layout.size());
+
+    Ok(unsafe { NonNull::new_unchecked(p) })
+  }
+
+  #[inline(always)]
+  unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+    let _ = self;
+    let _ = ptr;
+    let _ = layout;
   }
 }

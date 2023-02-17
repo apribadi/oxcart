@@ -1,11 +1,10 @@
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
 use expect_test::expect;
 use core::alloc::Layout;
 use core::fmt;
 use core::mem::size_of;
-use oxcart::AllocError;
-use oxcart::Allocator;
 use oxcart::Arena;
-use oxcart::Slot;
 
 #[inline(always)]
 fn addr<T: ?Sized>(p: *const T) -> usize {
@@ -41,15 +40,22 @@ fn test_api() {
   let _ = Arena::default();
   let _ = format!("{:?}", Arena::new());
   let _ = format!("{:?}", Arena::new().allocator());
-  let _ = format!("{:?}", AllocError);
   let _ = format!("{:?}", Arena::new().allocator().alloc::<u64>());
+}
+
+#[test]
+#[cfg(feature = "allocator_api")]
+fn test_allocator_api() {
+  let mut arena = Arena::new();
+  let allocator = arena.allocator();
+  let x = Box::new_in(13u64, &*allocator);
+  assert!(*x == 13);
 }
 
 #[test]
 fn test_debug() {
   expect!["Arena { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new()));
   expect!["Allocator { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new().allocator()));
-  expect!["AllocError"].assert_eq(&format!("{:?}", AllocError));
 }
 
 #[test]
@@ -99,6 +105,7 @@ fn test_multiple_allocators_without_reset() {
   let _ = allocator.alloc().init(3);
 }
 
+/*
 #[test]
 fn test_types_are_send_and_sync() {
   fn is_send_sync<T: Send + Sync>(_ : &T) {}
@@ -111,6 +118,7 @@ fn test_types_are_send_and_sync() {
   is_send_sync::<Slot<_>>(&x);
   is_send_sync::<Slot<_>>(&y);
 }
+*/
 
 #[test]
 fn test_linked_list() {

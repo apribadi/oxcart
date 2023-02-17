@@ -1,8 +1,11 @@
 use std::time::Instant;
 use std::hint;
 
+// mod intmap;
+
 const ITERS: usize = 10_000;
 const LEN: usize = 10_000;
+// const LEN: usize = 1_000;
 
 type List<'a, T> = Option<&'a Node<'a, T>>;
 
@@ -45,8 +48,39 @@ fn bench_oxcart(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
     let mut r: List<'a, u64> = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(allocator.alloc().init(Node { car: i as u64, cdr: r }));
+    }
+    r
+  }
+
+  let mut arena = oxcart::Arena::new();
+
+  for _ in 0 .. iters {
+    let allocator = arena.allocator();
+    let _: _ = hint::black_box(make_list(allocator, len));
+    arena.reset();
+  }
+}
+
+#[inline(never)]
+fn bench_oxcart_noinline(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_node<'a>
+    (
+      allocator: &mut oxcart::Allocator<'a>,
+      car: u64,
+      cdr: Option<&'a Node<'a, u64>>
+    ) -> &'a mut Node<'a, u64>
+  {
+    allocator.alloc().init(Node { car, cdr })
+  }
+
+  #[inline(never)]
+  fn make_list<'a>(allocator: &mut oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in (0 .. len).rev() {
+      r = Some(make_node(allocator, i as u64, r));
     }
     r
   }
@@ -65,7 +99,7 @@ fn bench_bumpalo(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
     let mut r: List<'a, u64> = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
@@ -80,11 +114,41 @@ fn bench_bumpalo(iters: usize, len: usize) {
 }
 
 #[inline(never)]
+fn bench_bumpalo_noinline(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_node<'a>
+    (
+      arena: &'a bumpalo::Bump,
+      car: u64,
+      cdr: Option<&'a Node<'a, u64>>
+    ) -> &'a mut Node<'a, u64>
+  {
+    arena.alloc(Node { car, cdr })
+  }
+
+  #[inline(never)]
+  fn make_list<'a>(arena: &'a bumpalo::Bump, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in (0 .. len).rev() {
+      r = Some(make_node(arena, i as u64, r));
+    }
+    r
+  }
+
+  let mut arena = bumpalo::Bump::new();
+
+  for _ in 0 .. iters {
+    let _: _ = hint::black_box(make_list(&arena, len));
+    arena.reset();
+  }
+}
+
+#[inline(never)]
 fn bench_typed_arena(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(arena: &'a typed_arena::Arena<Node<'a, u64>>, len: usize) -> List<'a, u64> {
     let mut r: List<'a, u64> = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(arena.alloc(Node { car: i as u64, cdr: r }));
     }
     r
@@ -101,7 +165,7 @@ fn bench_copy_arena(iters: usize, len: usize) {
   #[inline(never)]
   fn make_list<'a>(allocator: &'a mut copy_arena::Allocator<'a>, len: usize) -> List<'a, u64> {
     let mut r: List<'a, u64> = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(allocator.alloc(Node { car: i as u64, cdr: r }));
     }
     r
@@ -124,7 +188,7 @@ fn bench_slotmap(iters: usize, len: usize) {
     ) -> Option<slotmap::DefaultKey>
   {
     let mut r = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(slotmap.insert(NodeWithKey { car: i as u64, cdr: r }));
     }
     r
@@ -148,7 +212,7 @@ fn bench_generational_arena(iters: usize, len: usize) {
     ) -> Option<generational_arena::Index>
   {
     let mut r = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(arena.insert(NodeWithKey { car: i as u64, cdr: r }));
     }
     r
@@ -172,7 +236,7 @@ fn bench_slab(iters: usize, len: usize) {
     ) -> Option<usize>
   {
     let mut r = None;
-    for i in 0 .. len {
+    for i in (0 .. len).rev() {
       r = Some(slab.insert(NodeWithKey { car: i as u64, cdr: r }));
     }
     r
@@ -186,14 +250,121 @@ fn bench_slab(iters: usize, len: usize) {
   }
 }
 
+#[inline(never)]
+fn bench_box_leak(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_list<'a>(len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in (0 .. len).rev() {
+      r = Some(Box::leak(Box::new(Node { car: i as u64, cdr: r })));
+    }
+    r
+  }
+
+  for _ in 0 .. iters {
+    let _: List<_> = hint::black_box(make_list(len));
+  }
+}
+
+#[cfg(feature = "allocator_api")]
+#[inline(never)]
+fn bench_allocator_api(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_list<'a>(allocator: &oxcart::Allocator<'a>, len: usize) -> List<'a, u64> {
+    let mut r: List<'a, u64> = None;
+    for i in (0 .. len).rev() {
+      r = Some(Box::leak(Box::new_in(Node { car: i as u64, cdr: r }, allocator)));
+    }
+    r
+  }
+
+  let mut arena = oxcart::Arena::new();
+
+  for _ in 0 .. iters {
+    let allocator = arena.allocator();
+    let _: List<_> = hint::black_box(make_list(len), allocator);
+    arena.reset();
+  }
+}
+
+/*
+#[inline(never)]
+fn bench_intmap_oxcart(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_intmap<'a>
+    (
+      allocator: &mut oxcart::Allocator<'a>,
+      len: usize
+    ) -> intmap::IntMap<'a, u64>
+  {
+    let mut t = intmap::new();
+
+    for i in 0 .. len {
+      let i = i as u64;
+      t = intmap::with_oxcart::insert(allocator, i, i, t)
+    }
+
+    t
+  }
+
+  let mut arena = oxcart::Arena::new();
+
+  for _ in 0 .. iters {
+    let allocator = arena.allocator();
+    let _: _ = hint::black_box(make_intmap(allocator, len));
+    arena.reset();
+  }
+}
+
+#[inline(never)]
+fn bench_intmap_bumpalo(iters: usize, len: usize) {
+  #[inline(never)]
+  fn make_intmap<'a>
+    (
+      arena: &'a bumpalo::Bump,
+      len: usize
+    ) -> intmap::IntMap<'a, u64>
+  {
+    let mut t = intmap::new();
+
+    for i in 0 .. len {
+      let i = i as u64;
+      t = intmap::with_bumpalo::insert(arena, i, i, t)
+    }
+
+    t
+  }
+
+  let mut arena = bumpalo::Bump::new();
+
+  for _ in 0 .. iters {
+    let _: _ = hint::black_box(make_intmap(&arena, len));
+    arena.reset();
+  }
+}
+*/
+
+
 fn main() {
+  /*
+  warmup();
+
+  run_bench("intmap-oxcart", bench_intmap_oxcart);
+  run_bench("intmap-bumpalo", bench_intmap_bumpalo);
+  */
   warmup();
 
   run_bench("oxcart", bench_oxcart);
+  run_bench("oxcart-noinline", bench_oxcart_noinline);
   run_bench("bumpalo", bench_bumpalo);
+  run_bench("bumpalo-noinline", bench_bumpalo_noinline);
   run_bench("typed-arena", bench_typed_arena);
   run_bench("copy_arena", bench_copy_arena);
   run_bench("slotmap", bench_slotmap);
   run_bench("generational_arena", bench_generational_arena);
   run_bench("slab", bench_slab);
+  run_bench("box-leak", bench_box_leak);
+
+  #[cfg(feature = "allocator_api")]
+  run_bench("allocator_api", bench_allocator_api);
 }
