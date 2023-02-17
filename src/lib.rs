@@ -56,7 +56,8 @@ pub struct Slot<'a, T: 'a + ?Sized>(NonNull<T>, InvariantLifetime<'a>);
 
 /// A failed allocation from the arena.
 
-pub struct ArenaError;
+#[derive(Debug)]
+pub struct AllocError;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -74,7 +75,7 @@ struct Footer {
   total_allocated: usize,
 }
 
-trait Error {
+trait FromError {
   fn global_alloc_error(_: Layout) -> Self;
   fn layout_overflow() -> Self;
 }
@@ -134,7 +135,7 @@ impl Void {
   }
 }
 
-impl Error for Void {
+impl FromError for Void {
   #[inline(never)]
   #[cold]
   fn global_alloc_error(layout: Layout) -> Self {
@@ -150,11 +151,17 @@ impl Error for Void {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// ArenaError
+// AllocError
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl Error for ArenaError {
+impl fmt::Display for AllocError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("memory allocation failed")
+  }
+}
+
+impl FromError for AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self }
 
@@ -170,9 +177,10 @@ impl Error for ArenaError {
 
 // SAFETY:
 //
-// ???
+// You can send an `Arena` to another thread.
 //
-// Note that `Arena` can use interior mutability, so it is not `Sync`.
+// Note that `Arena` in some cases uses interior mutability, so it is not
+// `Sync`.
 
 unsafe impl Send for Arena {}
 
@@ -201,7 +209,7 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_chunk_for<E: Error>
+unsafe fn alloc_chunk_for<E: FromError>
   (
     object: Layout,
     chunks: *mut Footer
@@ -354,14 +362,17 @@ impl Arena {
     // method to imply that any lifetime associated with an `Allocator<_>` has
     // already ended.
 
-    let p = self.hi.get();
+    let lo = self.lo.get_mut();
+    let hi = self.hi.get_mut();
+
+    let p = *hi;
 
     if ! p.is_null() {
       let f = unsafe { &mut *p };
       let p = p as *mut u8;
       let p = p.wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
 
-      self.lo.set(p);
+      *lo = p;
 
       if let Some(next) = f.next {
         f.next = None;
@@ -371,7 +382,7 @@ impl Arena {
   }
 
   #[inline(always)]
-  fn alloc<E: Error>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
+  fn alloc<E: FromError>(&mut self, layout: Layout) -> Result<NonNull<u8>, E> {
     let size = layout.size();
     let align = layout.align();
 
@@ -402,7 +413,7 @@ impl Arena {
 
   #[cfg(feature = "allocator_api")]
   #[inline(always)]
-  fn alloc_shared<E: Error>(&self, layout: Layout) -> Result<NonNull<u8>, E> {
+  fn alloc_shared<E: FromError>(&self, layout: Layout) -> Result<NonNull<u8>, E> {
     let size = layout.size();
     let align = layout.align();
 
@@ -431,9 +442,9 @@ impl Arena {
 
 impl Drop for Arena {
   fn drop(&mut self) {
-    let p = self.hi.get();
+    let hi = self.hi.get_mut();
 
-    if let Some(p) = NonNull::new(p) {
+    if let Some(p) = NonNull::new(*hi) {
       unsafe { dealloc_chunk_list(p) }
     }
   }
@@ -463,7 +474,7 @@ impl fmt::Debug for Arena {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn gen_alloc<T, E: Error>(&mut self) -> Result<Slot<'a, T>, E> {
+  fn gen_alloc<T, E: FromError>(&mut self) -> Result<Slot<'a, T>, E> {
     let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.cast();
 
@@ -480,7 +491,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_slice<T, E: Error>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
+  fn gen_alloc_slice<T, E: FromError>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E> {
     let size_of_element = size_of::<T>();
     let align = align_of::<T>();
 
@@ -513,7 +524,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_alloc_layout<E: Error>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
+  fn gen_alloc_layout<E: FromError>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E> {
     let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
@@ -531,7 +542,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_slice<T: Copy, E: Error>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
+  fn gen_copy_slice<T: Copy, E: FromError>(&mut self, src: &[T]) -> Result<&'a mut [T], E> {
     // NB:
     //
     // - `Copy` implies `!Drop`.
@@ -571,7 +582,7 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  fn gen_copy_str<E: Error>(&mut self, src: &str) -> Result<&'a mut str, E> {
+  fn gen_copy_str<E: FromError>(&mut self, src: &str) -> Result<&'a mut str, E> {
     let p = self.gen_copy_slice(src.as_bytes())?;
 
     // SAFETY:
@@ -600,7 +611,7 @@ impl<'a> Allocator<'a> {
 
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, ArenaError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     self.gen_alloc()
   }
 
@@ -622,7 +633,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, ArenaError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
     self.gen_alloc_slice(len)
   }
 
@@ -644,7 +655,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, ArenaError> {
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, AllocError> {
     self.gen_alloc_layout(layout)
   }
 
@@ -666,7 +677,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], ArenaError> {
+  pub fn try_copy_slice<T: Copy>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError> {
     self.gen_copy_slice(src)
   }
 
@@ -688,7 +699,7 @@ impl<'a> Allocator<'a> {
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, ArenaError> {
+  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
     self.gen_copy_str(src)
   }
 }
@@ -885,7 +896,7 @@ impl<'a, T> Slot<'a, [T]> {
 }
 
 #[cfg(feature = "allocator_api")]
-impl Error for alloc::alloc::AllocError {
+impl FromError for alloc::alloc::AllocError {
   #[inline(always)]
   fn global_alloc_error(_: Layout) -> Self { Self {} }
 

@@ -48,8 +48,11 @@ fn test_api() {
 fn test_allocator_api() {
   let mut arena = Arena::new();
   let allocator = arena.allocator();
+  let _ = allocator.alloc::<u64>();
   let x = Box::new_in(13u64, &*allocator);
   assert!(*x == 13);
+  drop(x);
+  let _ = allocator.alloc::<u64>();
 }
 
 #[test]

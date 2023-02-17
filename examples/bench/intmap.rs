@@ -1,4 +1,3 @@
-/*
 #[derive(Debug)]
 pub enum IntMap<'a, T> {
   Empty,
@@ -346,5 +345,4 @@ pub mod with_bumpalo {
     }
   }
 }
-*/
 */

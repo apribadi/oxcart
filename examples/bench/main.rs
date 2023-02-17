@@ -1,14 +1,12 @@
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
-mod list;
+pub mod list;
+pub mod intmap;
 
 use std::time::Instant;
 use std::hint;
 use crate::list::List;
 use crate::list::Node;
-
-// mod intmap;
-
 
 const ITERS: usize = 10_000;
 const LEN: usize = 10_000;
