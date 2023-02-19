@@ -129,6 +129,7 @@ pub mod with_oxcart {
     s
   }
 
+  /*
   fn insert_nonempty<'a, T>
     (
       ox: &mut oxcart::Allocator<'a>,
@@ -162,6 +163,7 @@ pub mod with_oxcart {
       }
     }
   }
+  */
 
   pub fn insert<'a, T>
     (

@@ -17,6 +17,7 @@ extern crate alloc;
 use core::alloc::Layout;
 use core::cell::UnsafeCell;
 use core::fmt;
+use core::hint;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::mem::align_of;
@@ -47,27 +48,26 @@ pub struct Arena {
 
   lo: UnsafeCell<*mut u8>,
   hi: UnsafeCell<*mut Footer>,
-  total_allocated: UnsafeCell<usize>,
 }
 
 /// A handle for allocating objects with a particular lifetime.
 
 #[repr(transparent)]
-pub struct Allocator<'a> {
-  arena: Arena,
-  _0: PhantomData<InvariantLifetime<'a>>,
-}
+pub struct Allocator<'a>(
+  Arena,
+  PhantomData<InvariantLifetime<'a>>,
+);
 
 /// A shareable handle for allocating objects with a particular lifetime.
 
 #[cfg(feature = "allocator_api")]
 #[derive(Clone, Copy)]
 #[repr(transparent)]
-pub struct AllocatorRef<'a> {
-  arena: &'a Arena,
-  _0: PhantomData<InvariantLifetime<'a>>,
-  _1: PhantomData<NotSendOrSync>,
-}
+pub struct AllocatorRef<'a>(
+  &'a Arena,
+  PhantomData<(InvariantLifetime<'a>, NotSendOrSync)>,
+  PhantomData<NotSendOrSync>,
+);
 
 /// An uninitialized slot in the arena.
 ///
@@ -75,10 +75,11 @@ pub struct AllocatorRef<'a> {
 /// [`init_slice`](Self::init_slice).
 
 #[repr(transparent)]
-pub struct Slot<'a, T: 'a + ?Sized> {
-  pointer: NonNull<T>,
-  _0: PhantomData<InvariantLifetime<'a>>,
-}
+pub struct Slot<'a, T: 'a + ?Sized>(
+  NonNull<T>,
+  PhantomData<InvariantLifetime<'a>>,
+);
+
 /// A failed allocation from the arena.
 
 #[derive(Debug)]
@@ -93,8 +94,9 @@ pub struct AllocError;
 enum Void {}
 
 struct Footer {
-  layout: Layout,
   next: Option<NonNull<Footer>>,
+  total_allocated: usize,
+  layout: Layout,
 }
 
 trait FromError {
@@ -245,9 +247,9 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 #[cold]
 unsafe fn alloc_chunk_for<E>
   (
-    total_allocated: *mut usize,
+    lo: *mut u8,
+    hi: *mut Footer,
     object: Layout,
-    chunks: *mut Footer,
   )
   -> Result<(*mut u8, *mut Footer), E>
 where
@@ -255,12 +257,12 @@ where
 {
   // SAFETY:
   //
-  // `chunks` must either be null or point to a valid `Footer`.
+  // `hi` must either be null or point to a valid `Footer`.
 
   // POSTCONDITIONS:
   //
   // If this function returns `Ok(_)`, then it has allocated a new chunk and
-  // placed it at the head of linked list whose previous head was `chunks`.
+  // placed it at the head of linked list whose previous head was `hi`.
   // Additionally, the first (`*mut u8`) pointer points to memory suitable for
   // the start of an object with layout `object`.
   //
@@ -272,9 +274,14 @@ where
   const _: () = assert!(FOOTER_SIZE <= MIN_CHUNK_SIZE);
   const _: () = assert!(FOOTER_ALIGN <= MIN_CHUNK_ALIGN);
 
-  let chunks = NonNull::new(chunks);
+  let _ = hint::black_box(lo);
+  let chunks = NonNull::new(hi);
 
-  let total = unsafe { ptr::read(total_allocated) };
+  let total_allocated =
+    match chunks {
+      None => 0,
+      Some(f) => unsafe { f.as_ref() }.total_allocated
+    };
 
   let object_size = object.size();
   let object_align = object.align();
@@ -282,7 +289,7 @@ where
   // The chunk size we'd like to allocate, if the object will fit in it.  It
   // is always a power of two `<= 0b0100...`.
 
-  let size_0 = total / 4 + 1;
+  let size_0 = total_allocated / 4 + 1;
   let size_0 = 1 << (usize::BITS - (size_0 - 1).leading_zeros());
   let size_0 = max(size_0, MIN_CHUNK_SIZE);
 
@@ -330,11 +337,9 @@ where
 
   let hi = lo.wrapping_add(size).wrapping_sub(FOOTER_SIZE) as *mut Footer;
 
-  let total = total.saturating_add(size);
+  let total_allocated = total_allocated.saturating_add(size);
 
-  unsafe { ptr::write(total_allocated, total) };
-
-  let f = Footer { layout, next: chunks };
+  let f = Footer { next: chunks, total_allocated, layout };
 
   // SAFETY:
   //
@@ -360,7 +365,6 @@ impl Arena {
     Self {
       lo: UnsafeCell::new(invalid_mut(1)),
       hi: UnsafeCell::new(invalid_mut(0)),
-      total_allocated: UnsafeCell::new(0),
     }
   }
 
@@ -411,11 +415,7 @@ impl Arena {
     // The `AllocatorRef` itself can be safely duplicated because it (unlike
     // `Arena`) can't be transferred to a different thread.
 
-    AllocatorRef {
-      arena: self,
-      _0: PhantomData,
-      _1: PhantomData,
-    }
+    AllocatorRef(self, PhantomData, PhantomData)
   }
 
   /// Deallocates all objects previously allocated from the arena. The arena
@@ -459,7 +459,6 @@ impl Arena {
 
     let lo = self.lo.get_mut();
     let hi = self.hi.get_mut();
-    let total_allocated = self.total_allocated.get();
 
     let p = *lo;
     let q = *hi;
@@ -467,7 +466,7 @@ impl Arena {
     let p = mask(p.wrapping_add(align - 1), ! (align - 1));
 
     if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
-      let (p, q) = unsafe { alloc_chunk_for::<E>(total_allocated, layout, q) }?;
+      let (p, q) = unsafe { alloc_chunk_for::<E>(p, q, layout) }?;
       *lo = p;
       *hi = q;
     } else {
@@ -499,7 +498,6 @@ impl Arena {
 
     let lo = self.lo.get();
     let hi = self.hi.get();
-    let total_allocated = self.total_allocated.get();
 
     let p = unsafe { ptr::read(lo) };
     let q = unsafe { ptr::read(hi) };
@@ -507,7 +505,7 @@ impl Arena {
     let p = mask(p.wrapping_add(align - 1), ! (align - 1));
 
     if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
-      let (p, q) = unsafe { alloc_chunk_for::<E>(total_allocated, layout, q) }?;
+      let (p, q) = unsafe { alloc_chunk_for::<E>(p, q, layout) }?;
       unsafe { ptr::write(lo, p) };
       unsafe { ptr::write(hi, q) };
     } else {
@@ -566,7 +564,7 @@ impl<'a> Allocator<'a> {
   where
     E: FromError
   {
-    let p = self.arena.alloc::<E>(Layout::new::<T>())?;
+    let p = self.0.alloc::<E>(Layout::new::<T>())?;
     let p = p.as_ptr();
     let p = p as *mut _;
 
@@ -599,7 +597,7 @@ impl<'a> Allocator<'a> {
     let size = size_of_element * len;
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
-    let p = self.arena.alloc::<E>(layout)?;
+    let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = p as *mut _;
     let p = ptr::slice_from_raw_parts_mut(p, len);
@@ -619,7 +617,7 @@ impl<'a> Allocator<'a> {
   where
     E: FromError
   {
-    let p = self.arena.alloc::<E>(layout)?;
+    let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
 
@@ -652,7 +650,7 @@ impl<'a> Allocator<'a> {
 
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
-    let p = self.arena.alloc::<E>(layout)?;
+    let p = self.0.alloc::<E>(layout)?;
     let p = p.as_ptr();
     let p = p as *mut _;
     let q = src.as_ptr();
@@ -813,7 +811,7 @@ impl<'a> Allocator<'a> {
 
 impl fmt::Debug for Allocator<'_> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.arena.debug(f, "Allocator")
+    self.0.debug(f, "Allocator")
   }
 }
 
@@ -835,7 +833,7 @@ impl FromError for alloc::alloc::AllocError {
 #[cfg(feature = "allocator_api")]
 impl fmt::Debug for AllocatorRef<'_> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.arena.debug(f, "Allocator")
+    self.0.debug(f, "Allocator")
   }
 }
 
@@ -848,7 +846,7 @@ unsafe impl<'a> alloc::alloc::Allocator for AllocatorRef<'a> {
     // No other reference to the `Arena` is currently live in a different
     // thread.
 
-    let p = unsafe { self.arena.alloc_shared::<alloc::alloc::AllocError>(layout) }?;
+    let p = unsafe { self.0.alloc_shared::<alloc::alloc::AllocError>(layout) }?;
     let p = p.as_ptr();
     let p = ptr::slice_from_raw_parts_mut(p, layout.size());
 
@@ -887,7 +885,7 @@ unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized + Sync {}
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_tuple("Slot")
-      .field(&self.pointer)
+      .field(&self.0)
       .finish()
   }
 }
@@ -906,10 +904,7 @@ where
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Self {
-      pointer: unsafe { NonNull::new_unchecked(pointer) },
-      _0: PhantomData
-    }
+    Self(unsafe { NonNull::new_unchecked(pointer) }, PhantomData)
   }
 
   /// Converts the slot into a non-null pointer to its underlying memory.
@@ -917,7 +912,7 @@ where
   /// The pointer is properly aligned.
 
   pub fn as_non_null(self) -> NonNull<T> {
-    self.pointer
+    self.0
   }
 
   /// Converts the slot into a pointer to its underlying memory.
@@ -925,7 +920,7 @@ where
   /// The pointer is non-null and properly aligned.
 
   pub fn as_ptr(self) -> *mut T {
-    self.pointer.as_ptr()
+    self.0.as_ptr()
   }
 }
 
@@ -934,7 +929,7 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = self.pointer.as_ptr();
+    let p = self.0.as_ptr();
     let p = p as *mut _;
 
     // SAFETY:
@@ -965,7 +960,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    let p = self.pointer.as_ptr();
+    let p = self.0.as_ptr();
     let p = p as *mut _;
 
     // SAFETY:
@@ -1016,15 +1011,15 @@ impl<'a, T> Slot<'a, [T]> {
 
   #[inline(always)]
   pub fn len(&self) -> usize {
-    self.pointer.len()
+    self.0.len()
   }
 
   /// Converts the slot into a reference to a slice of uninitialized values.
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    let n = self.pointer.len();
-    let p = self.pointer.as_ptr();
+    let n = self.0.len();
+    let p = self.0.as_ptr();
     let p = p as *mut _;
 
     // SAFETY:

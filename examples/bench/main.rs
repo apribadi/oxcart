@@ -202,7 +202,7 @@ fn bench_box_leak(iters: usize, len: usize) {
 #[inline(never)]
 fn bench_allocator_api_oxcart(iters: usize, len: usize) {
   #[inline(never)]
-  fn make_list<'a>(allocator: &'a oxcart::SharedAllocator<'a>, len: usize) -> List<'a, u64> {
+  fn make_list<'a>(allocator: oxcart::AllocatorRef<'a>, len: usize) -> List<'a, u64> {
     let mut r = List::Nil;
     for i in (0 .. len).rev() {
       r = List::Cons(Box::leak(Box::new_in(Node { car: i as u64, cdr: r }, allocator)));
@@ -213,7 +213,7 @@ fn bench_allocator_api_oxcart(iters: usize, len: usize) {
   let mut arena = oxcart::Arena::new();
 
   for _ in 0 .. iters {
-    let allocator = arena.shared_allocator();
+    let allocator = arena.allocator_ref();
     let _: List<_> = hint::black_box(make_list(allocator, len));
     arena.reset();
   }
@@ -277,21 +277,21 @@ fn bench_intmap_bumpalo(iters: usize, len: usize) {
 fn main() {
   warmup();
 
-  run_bench(5_000, 5_000, "oxcart", bench_oxcart);
-  run_bench(5_000, 5_000, "bumpalo", bench_bumpalo);
-  run_bench(5_000, 5_000, "typed-arena", bench_typed_arena);
-  run_bench(5_000, 5_000, "copy_arena", bench_copy_arena);
-  run_bench(5_000, 5_000, "slotmap", bench_slotmap);
-  run_bench(5_000, 5_000, "generational_arena", bench_generational_arena);
-  run_bench(5_000, 5_000, "slab", bench_slab);
-  run_bench(5_000, 5_000, "box-leak", bench_box_leak);
+  run_bench(20_000, 5_000, "oxcart", bench_oxcart);
+  run_bench(20_000, 5_000, "bumpalo", bench_bumpalo);
+  run_bench(20_000, 5_000, "typed-arena", bench_typed_arena);
+  run_bench(20_000, 5_000, "copy_arena", bench_copy_arena);
+  run_bench(20_000, 5_000, "slotmap", bench_slotmap);
+  run_bench(20_000, 5_000, "generational_arena", bench_generational_arena);
+  run_bench(20_000, 5_000, "slab", bench_slab);
+  run_bench(20_000, 5_000, "box-leak", bench_box_leak);
 
   #[cfg(feature = "allocator_api")]
-  run_bench(5_000, 5_000, "allocator_api_oxcart", bench_allocator_api_oxcart);
+  run_bench(10_000, 5_000, "allocator_api_oxcart", bench_allocator_api_oxcart);
 
   run_bench(5_000, 1_000, "intmap-oxcart", bench_intmap_oxcart);
   run_bench(5_000, 1_000, "intmap-bumpalo", bench_intmap_bumpalo);
 
-  println!("{:?}", make_intmap_oxcart(oxcart::Arena::new().allocator_mut(), 20));
-  println!("{:?}", make_intmap_bumpalo(&bumpalo::Bump::new(), 20));
+  // println!("{:?}", make_intmap_oxcart(oxcart::Arena::new().allocator_mut(), 20));
+  // println!("{:?}", make_intmap_bumpalo(&bumpalo::Bump::new(), 20));
 }
