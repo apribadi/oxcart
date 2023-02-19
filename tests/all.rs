@@ -17,9 +17,9 @@ fn addr<T: ?Sized>(p: *const T) -> usize {
 #[test]
 fn test_api() {
   let mut arena = Arena::new();
-  let _ = arena.allocator();
+  let _ = arena.allocator_mut();
   arena.reset();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let _ = allocator.alloc::<u64>();
   let _ = allocator.try_alloc::<u64>();
   let _ = allocator.alloc_slice::<u64>(5);
@@ -41,26 +41,27 @@ fn test_api() {
   let _ = allocator.alloc_slice::<u64>(5).init_slice(|i| i as u64);
   let _ = Arena::default();
   let _ = format!("{:?}", Arena::new());
-  let _ = format!("{:?}", Arena::new().allocator());
-  let _ = format!("{:?}", Arena::new().allocator().alloc::<u64>());
+  let _ = format!("{:?}", Arena::new().allocator_mut());
+  let _ = format!("{:?}", Arena::new().allocator_mut().alloc::<u64>());
 }
 
 #[test]
 #[cfg(feature = "allocator_api")]
 fn test_allocator_api() {
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
-  let _ = allocator.alloc::<u64>();
-  let x = Box::new_in(13u64, &*allocator);
+  let allocator = arena.allocator_ref();
+  let mut x = Box::new_in(0u64, allocator);
+  let mut y = Vec::new_in(allocator);
+  *x += 13;
+  y.extend([0, 1, 2, 3, 4]);
   assert!(*x == 13);
-  drop(x);
-  let _ = allocator.alloc::<u64>();
+  assert!(y == &[0, 1, 2, 3, 4]);
 }
 
 #[test]
 fn test_debug() {
   expect!["Arena { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new()));
-  expect!["Allocator { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new().allocator()));
+  expect!["Allocator { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new().allocator_mut()));
 }
 
 #[test]
@@ -69,7 +70,7 @@ fn test_too_big_allocation() {
   let too_big_nwords = too_big_nbytes / size_of::<usize>();
   let too_big_layout = Layout::from_size_align(too_big_nbytes, 1).unwrap();
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   assert!(allocator.try_alloc_slice::<usize>(too_big_nwords).is_err());
   assert!(allocator.try_alloc_layout(too_big_layout).is_err());
 }
@@ -77,7 +78,7 @@ fn test_too_big_allocation() {
 #[test]
 fn test_zero_size_allocation() {
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let a = allocator.alloc().init(());
   let b = allocator.alloc_slice(0).init_slice(|_| 0u64);
   let c = allocator.alloc_slice(5).init_slice(|_| ());
@@ -91,7 +92,7 @@ fn test_zero_size_allocation() {
 #[test]
 fn test_alignment() {
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   for align in [1, 2, 4, 8, 16, 32, 64] {
     let layout = Layout::from_size_align(1, align).unwrap();
     let p = allocator.alloc_layout(layout).as_ptr();
@@ -102,11 +103,11 @@ fn test_alignment() {
 #[test]
 fn test_multiple_allocators_without_reset() {
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let _ = allocator.alloc().init(1);
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let _ = allocator.alloc().init(2);
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let _ = allocator.alloc().init(3);
 }
 
@@ -116,7 +117,7 @@ fn test_types_are_send_and_sync() {
   fn is_sync<T: Sync>(_ : &T) {}
   let mut arena = Arena::new();
   is_send::<Arena>(&arena);
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   is_send::<Allocator>(allocator);
   let x = allocator.alloc::<u64>();
   let y = allocator.alloc_slice::<u64>(5);
@@ -134,7 +135,7 @@ fn test_linked_list() {
   }
 
   let mut arena = Arena::new();
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
   let mut head: Option<&Node<u64>> = None;
   for i in 0 .. 10 {
     head = Some(allocator.alloc().init(Node { car: i as u64, cdr: head }));
@@ -151,7 +152,7 @@ fn test_linked_list() {
 fn test_demo() {
   let mut arena = Arena::new();
 
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
 
   let x = allocator.alloc().init(0);
   let y = allocator.alloc().init(0);
@@ -165,7 +166,7 @@ fn test_demo() {
 
   arena.reset();
 
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
 
   let _ = allocator.alloc::<[u64; 100000]>();
   let _ = allocator.alloc::<[u64; 0]>();
@@ -173,7 +174,7 @@ fn test_demo() {
 
   arena.reset();
 
-  let allocator = arena.allocator();
+  let allocator = arena.allocator_mut();
 
   let x = allocator.alloc_slice(3).init_slice(|i| (i as u64) + 1);
   let y = allocator.alloc_layout(Layout::new::<[u64; 10]>());

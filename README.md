@@ -7,7 +7,7 @@ objects and then deallocating all of them at once.
 
 ```rust
 let mut arena = oxcart::Arena::new();
-let allocator = arena.allocator();
+let allocator = arena.allocator_mut();
 
 let x: &mut u64 = allocator.alloc().init(13);
 let y: &mut [u64] = allocator.alloc_slice(5).init_slice(|i| i as u64);
