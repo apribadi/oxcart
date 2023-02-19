@@ -220,56 +220,56 @@ fn bench_allocator_api_oxcart(iters: usize, len: usize) {
 }
 
 #[inline(never)]
-fn bench_intmap_oxcart(iters: usize, len: usize) {
-  #[inline(never)]
-  fn make_intmap<'a>
-    (
-      allocator: &mut oxcart::Allocator<'a>,
-      len: usize
-    ) -> intmap::IntMap<'a, u64>
-  {
-    let mut t = intmap::new();
+fn make_intmap_oxcart<'a>
+  (
+    allocator: &mut oxcart::Allocator<'a>,
+    len: usize
+  ) -> intmap::IntMap<'a, u64>
+{
+  let mut t = intmap::new();
 
-    for i in 0 .. len {
-      let i = i as u64;
-      t = intmap::with_oxcart::insert(allocator, i, i, t)
-    }
-
-    t
+  for i in 0 .. len {
+    let i = i as u64;
+    t = intmap::with_oxcart::insert(allocator, i, i, t)
   }
 
+  t
+}
+
+#[inline(never)]
+fn bench_intmap_oxcart(iters: usize, len: usize) {
   let mut arena = oxcart::Arena::new();
 
   for _ in 0 .. iters {
     let allocator = arena.allocator();
-    let _: _ = hint::black_box(make_intmap(allocator, len));
+    let _: _ = hint::black_box(make_intmap_oxcart(allocator, len));
     arena.reset();
   }
 }
 
 #[inline(never)]
-fn bench_intmap_bumpalo(iters: usize, len: usize) {
-  #[inline(never)]
-  fn make_intmap<'a>
-    (
-      arena: &'a bumpalo::Bump,
-      len: usize
-    ) -> intmap::IntMap<'a, u64>
-  {
-    let mut t = intmap::new();
+fn make_intmap_bumpalo<'a>
+  (
+    arena: &'a bumpalo::Bump,
+    len: usize
+  ) -> intmap::IntMap<'a, u64>
+{
+  let mut t = intmap::new();
 
-    for i in 0 .. len {
-      let i = i as u64;
-      t = intmap::with_bumpalo::insert(arena, i, i, t)
-    }
-
-    t
+  for i in 0 .. len {
+    let i = i as u64;
+    t = intmap::with_bumpalo::insert(arena, i, i, t)
   }
 
+  t
+}
+
+#[inline(never)]
+fn bench_intmap_bumpalo(iters: usize, len: usize) {
   let mut arena = bumpalo::Bump::new();
 
   for _ in 0 .. iters {
-    let _: _ = hint::black_box(make_intmap(&arena, len));
+    let _: _ = hint::black_box(make_intmap_bumpalo(&arena, len));
     arena.reset();
   }
 }
@@ -291,4 +291,7 @@ fn main() {
 
   run_bench(5_000, 1_000, "intmap-oxcart", bench_intmap_oxcart);
   run_bench(5_000, 1_000, "intmap-bumpalo", bench_intmap_bumpalo);
+
+  println!("{:?}", make_intmap_oxcart(oxcart::Arena::new().allocator(), 20));
+  println!("{:?}", make_intmap_bumpalo(&bumpalo::Bump::new(), 20));
 }

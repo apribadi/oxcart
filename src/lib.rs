@@ -16,7 +16,6 @@ extern crate alloc;
 
 use core::alloc::Layout;
 use core::cell::Cell;
-use core::cmp::max;
 use core::fmt;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
@@ -95,13 +94,19 @@ const MIN_CHUNK_SIZE_LOG2: usize = 6; // 64b
 const FOOTER_SIZE: usize = size_of::<Footer>();
 const FOOTER_ALIGN: usize = align_of::<Footer>();
 const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
-const MIN_CHUNK_ALIGN: usize = FOOTER_ALIGN;
+const MIN_CHUNK_ALIGN: usize = max(FOOTER_ALIGN, WORD_ALIGN);
+const WORD_ALIGN: usize = align_of::<usize>();
 
 ////////////////////////////////////////////////////////////////////////////////
 //
 // UTILITY FUNCTIONS
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+#[inline(always)]
+const fn max(x: usize, y: usize) -> usize {
+  if x >= y { x } else { y }
+}
 
 #[inline(always)]
 fn invalid_mut<T>(addr: usize) -> *mut T {
