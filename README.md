@@ -21,7 +21,7 @@ arena.reset();
 ## Features
 
 - speed
-- allocation of objects with multiple types
+- allocation of multiple types in a single arena
 - allocation of slices, strings, and arbitrary layouts
 - allocation separated from initialization to avoid stack spills
 - reuse of memory after `reset`-ing an arena

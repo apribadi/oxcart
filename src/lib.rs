@@ -40,9 +40,8 @@ use core::str;
 pub struct Arena {
   // SAFETY:
   //
-  // We maintain the invariant that if we are writing to a field, then it is
-  // not possible for a reference to this struct to be live in a different
-  // thread.
+  // We ensure if we are writing to a field, then it is not possible for a
+  // reference to this struct to be live in a different thread.
   //
   // It follows that it is always sound to read from these fields.
 
@@ -50,7 +49,7 @@ pub struct Arena {
   hi: UnsafeCell<*mut Footer>,
 }
 
-/// A handle for allocating objects with a particular lifetime.
+/// A view of an arena for allocating objects with a particular lifetime.
 
 #[repr(transparent)]
 pub struct Allocator<'a>(
@@ -58,15 +57,16 @@ pub struct Allocator<'a>(
   PhantomData<InvariantLifetime<'a>>,
 );
 
-/// A shareable handle for allocating objects with a particular lifetime.
+/// A shareable reference to an arena for allocating objects with a particular
+/// lifetime.
 
 #[cfg(feature = "allocator_api")]
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct AllocatorRef<'a>(
   &'a Arena,
-  PhantomData<(InvariantLifetime<'a>, NotSendOrSync)>,
-  PhantomData<NotSendOrSync>,
+  PhantomData<InvariantLifetime<'a>>,
+  PhantomData<NotSendNotSync>,
 );
 
 /// An uninitialized slot in the arena.
@@ -107,7 +107,7 @@ trait FromError {
 struct InvariantLifetime<'a>(fn(&'a ()) -> &'a ());
 
 #[cfg(feature = "allocator_api")]
-struct NotSendOrSync(*const ());
+struct NotSendNotSync(*const ());
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -214,7 +214,7 @@ impl RefUnwindSafe for Arena {}
 
 // SAFETY:
 //
-// See safety comment on the `struct Arena` declaration.
+// See safety comment on the `struct Arena` type declaration.
 
 unsafe impl Send for Arena {}
 
@@ -230,15 +230,15 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // Chunk sizes grow exponentially, so stack usage is O(log(word size)) at
   // worst even without TCO.
 
+  let q = unsafe { p.as_ref() }.next;
+  let l = unsafe { p.as_ref() }.layout;
   let p = p.as_ptr();
-  let f = unsafe { ptr::read(p) };
   let p = p as *mut u8;
-  let p = p.wrapping_add(FOOTER_SIZE);
-  let p = p.wrapping_sub(f.layout.size());
+  let p = p.wrapping_add(FOOTER_SIZE).wrapping_sub(l.size());
 
-  unsafe { alloc::alloc::dealloc(p, f.layout) }
+  unsafe { alloc::alloc::dealloc(p, l) }
 
-  if let Some(p) = f.next {
+  if let Some(p) = q {
     unsafe { dealloc_chunk_list(p) }
   }
 }
@@ -409,11 +409,12 @@ impl Arena {
     // SAFETY:
     //
     // There must be no other currently live reference to the `Arena`, because
-    // an `AllocatorRef` can the underying `Arena` with interior mutability.
-    // We ensure this by taking a `&mut self` parameter here.
+    // an `AllocatorRef` can access the underying `Arena` with interior
+    // mutability and `Arena` itself is `Sync`.  We ensure this by taking a
+    // `&mut self` parameter here.
     //
-    // The `AllocatorRef` itself can be safely duplicated because it (unlike
-    // `Arena`) can't be transferred to a different thread.
+    // The `AllocatorRef` itself can be safely duplicated because it (unlike a
+    // `&Arena`) is neither `Send` nor `Sync`.
 
     AllocatorRef(self, PhantomData, PhantomData)
   }
@@ -427,8 +428,8 @@ impl Arena {
     //
     // Various allocation methods use unsafe code to create references from
     // pointers.  For that code to be sound, it is necessary for calling this
-    // method to imply that any lifetime associated with an `Allocator` has
-    // already ended.
+    // method to imply that any lifetime associated with an `Allocator` or
+    // `AllocatorRef` has already ended.
 
     let lo = self.lo.get_mut();
     let hi = self.hi.get_mut();
