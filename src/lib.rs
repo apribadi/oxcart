@@ -25,7 +25,6 @@ use core::mem::needs_drop;
 use core::mem::size_of;
 use core::panic::RefUnwindSafe;
 use core::ptr::NonNull;
-use core::slice;
 use core::str;
 use ptr_monotype::ptr;
 
@@ -364,6 +363,8 @@ impl Arena {
     // The type `&'a mut Allocator<'b>` has two lifetimes, which, during usage,
     // can differ from each other due to reborrowing.
 
+    let p = ptr::from(self);
+
     // SAFETY:
     //
     // Various allocation methods use unsafe code to create references from
@@ -376,7 +377,7 @@ impl Arena {
     // The soundness of this cast depends on the fact that `Allocator` is
     // `#[repr(transparent)]` with an `Arena` field.
 
-    unsafe { ptr::new(self).as_mut_ref() }
+    unsafe { p.as_mut_ref() }
   }
 
   /// Gets a handle with which to allocate objects from the arena. The lifetime
@@ -482,31 +483,33 @@ impl Arena {
     let lo = self.lo.get();
     let hi = self.hi.get();
 
-    let p = unsafe { core::ptr::read(lo) };
-    let q = unsafe { core::ptr::read(hi) };
+    let p = unsafe { lo.read() };
+    let q = unsafe { hi.read() };
 
     let p = (p + (align - 1)) & ! (align - 1);
 
     if size as isize > (q - p) as isize {
       let (p, q) = unsafe { alloc_chunk_for::<E>(p, q, layout) }?;
-      unsafe { core::ptr::write(lo, p) };
-      unsafe { core::ptr::write(hi, q) };
+      unsafe { lo.write(p) };
+      unsafe { hi.write(q) };
     } else {
-      unsafe { core::ptr::write(lo, p) };
+      unsafe { lo.write(p) };
     }
 
-    let p = unsafe { core::ptr::read(lo) };
+    let p = unsafe { lo.read() };
 
-    unsafe { core::ptr::write(lo, p + size) };
+    unsafe { lo.write(p + size) };
 
     Ok(p)
   }
 
   fn debug(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
-    let lo = unsafe { core::ptr::read(self.lo.get()) };
-    let hi = unsafe { core::ptr::read(self.hi.get()) };
+    let lo = self.lo.get();
+    let hi = self.hi.get();
+    let p = unsafe { lo.read() };
+    let q = unsafe { hi.read() };
 
-    f.debug_struct(name).field("lo", &lo).field("hi", &hi).finish()
+    f.debug_struct(name).field("lo", &p).field("hi", &q).finish()
   }
 }
 
@@ -579,7 +582,6 @@ where
   let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
   let p = allocator.alloc_memory(layout)?;
-  let p = core::ptr::slice_from_raw_parts_mut(p.into(), len);
 
   // SAFETY:
   //
@@ -588,7 +590,7 @@ where
   // - The memory is not aliased by any other reference.
   // - The memory is live for the duration of the assigned lifetime.
 
-  Ok(unsafe { Slot::new(p) })
+  Ok(unsafe { Slot::new_slice(p, len) })
 }
 
 #[inline(always)]
@@ -598,7 +600,6 @@ where
   E: FromError
 {
   let p = allocator.alloc_memory(layout)?;
-  let p = core::ptr::slice_from_raw_parts_mut(p.into(), layout.size());
 
   // SAFETY:
   //
@@ -607,7 +608,7 @@ where
   // - The memory is not aliased by any other reference.
   // - The memory is live for the duration of the assigned lifetime.
 
-  Ok(unsafe { Slot::new(p) })
+  Ok(unsafe { Slot::new_slice(p, layout.size()) })
 }
 
 #[inline(always)]
@@ -631,7 +632,7 @@ where
   let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
   let p = allocator.alloc_memory(layout)?;
-  let q = ptr::new(src);
+  let q = ptr::from(src);
 
   // SAFETY:
   //
@@ -974,7 +975,7 @@ unsafe impl<'a> alloc::alloc::Allocator for AllocatorRef<'a> {
     // thread.
 
     let p = self.alloc_memory::<alloc::alloc::AllocError>(layout)?;
-    let p = p.as_slice_mut_ptr(layout.size());
+    let p = core::ptr::slice_from_raw_parts_mut(p.into(), layout.size());
 
     Ok(unsafe { NonNull::new_unchecked(p) })
   }
@@ -1016,11 +1017,10 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
   }
 }
 
-impl<'a, T> Slot<'a, T>
-where
-  T: ?Sized
-{
-  unsafe fn new(pointer: *mut T) -> Self {
+impl<'a, T> Slot<'a, T> {
+  unsafe fn new(p: ptr) -> Self {
+    let p = p.into();
+
     // SAFETY:
     //
     // To satisfy invariants for `Slot`, we require that
@@ -1030,16 +1030,14 @@ where
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Self(unsafe { NonNull::new_unchecked(pointer) }, PhantomData)
+    Self(unsafe { NonNull::new_unchecked(p) }, PhantomData)
   }
-}
 
-impl<'a, T> Slot<'a, T> {
   /// Converts the slot into a reference to an uninitialized value.
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = ptr::new(self.0.as_ptr());
+    let p = ptr::from(self.0);
 
     // SAFETY:
     //
@@ -1069,15 +1067,14 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    let p = self.0.as_ptr();
-    let p = p as *mut _;
+    let p = ptr::from(self.0);
 
     // SAFETY:
     //
     // The pointed-to memory is valid for an array of `T`s, though
     // uninitialized.
 
-    unsafe { &mut *p }
+    unsafe { p.as_mut_ref() }
   }
 
   /// Initializes the array with values produced by calling the given function
@@ -1104,18 +1101,32 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       let _: _ = elt.write(f(i));
     }
 
-    let p = p as *mut _;
-    let p = p as *mut _;
+    let p = ptr::from(p);
 
     // SAFETY:
     //
     // Every array element has been initialized.
 
-    unsafe { &mut *p }
+    unsafe { p.as_mut_ref() }
   }
 }
 
 impl<'a, T> Slot<'a, [T]> {
+  unsafe fn new_slice(p: ptr, len: usize) -> Self {
+    let p = core::ptr::slice_from_raw_parts_mut(p.into(), len);
+
+    // SAFETY:
+    //
+    // To satisfy invariants for `Slot`, we require that
+    //
+    // - The pointer is non-null and aligned, even if `size == 0`.
+    // - The memory has the correct size.
+    // - The memory is not aliased by any other reference.
+    // - The memory is live for the duration of the assigned lifetime.
+
+    Self(unsafe { NonNull::new_unchecked(p) }, PhantomData)
+  }
+
   /// The length of the slice (in items, not bytes) occupying the slot.
 
   #[inline(always)]
@@ -1128,15 +1139,14 @@ impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     let n = self.0.len();
-    let p = self.0.as_ptr();
-    let p = p as *mut _;
+    let p = ptr::from(self.0);
 
     // SAFETY:
     //
     // The pointed-to memory is valid for a slice of `T`s, though
     // uninitialized.
 
-    unsafe { slice::from_raw_parts_mut(p, n) }
+    unsafe { p.as_slice_mut_ref(n) }
   }
 
   /// Initializes the slice with values produced by calling the given function
@@ -1163,13 +1173,13 @@ impl<'a, T> Slot<'a, [T]> {
       let _: _ = elt.write(f(i));
     }
 
-    let p = p as *mut _;
-    let p = p as *mut _;
+    let n = p.len();
+    let p = ptr::from(p);
 
     // SAFETY:
     //
     // Every slice element has been initialized.
 
-    unsafe { &mut *p }
+    unsafe { p.as_slice_mut_ref(n) }
   }
 }

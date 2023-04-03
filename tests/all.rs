@@ -30,8 +30,6 @@ fn test_api() {
   let _ = allocator.try_copy_slice::<u64>(&[0, 1, 2, 3, 4]);
   let _ = allocator.copy_str("hello");
   let _ = allocator.try_copy_str("hello");
-  let _ = allocator.alloc::<u64>().as_non_null();
-  let _ = allocator.alloc::<u64>().as_ptr();
   let _ = allocator.alloc::<u64>().as_uninit();
   let _ = allocator.alloc::<u64>().init(13);
   let _ = allocator.alloc::<[u64; 5]>().as_uninit_array();
@@ -95,7 +93,7 @@ fn test_alignment() {
   let allocator = arena.allocator_mut();
   for align in [1, 2, 4, 8, 16, 32, 64] {
     let layout = Layout::from_size_align(1, align).unwrap();
-    let p = allocator.alloc_layout(layout).as_ptr();
+    let p = allocator.alloc_layout(layout).as_uninit_slice();
     assert!(addr(p) & (align - 1) == 0);
   }
 }
