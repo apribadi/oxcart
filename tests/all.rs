@@ -60,8 +60,8 @@ fn test_allocator_api() {
 
 #[test]
 fn test_debug() {
-  expect!["Arena { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new()));
-  expect!["Allocator { lo: 0x1, hi: 0x0 }"].assert_eq(&format!("{:?}", Arena::new().allocator_mut()));
+  expect!["Arena { lo: 0x0000000000000001, hi: 0x0000000000000000 }"].assert_eq(&format!("{:?}", Arena::new()));
+  expect!["Allocator { lo: 0x0000000000000001, hi: 0x0000000000000000 }"].assert_eq(&format!("{:?}", Arena::new().allocator_mut()));
 }
 
 #[test]

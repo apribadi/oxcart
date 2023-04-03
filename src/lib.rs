@@ -25,9 +25,9 @@ use core::mem::needs_drop;
 use core::mem::size_of;
 use core::panic::RefUnwindSafe;
 use core::ptr::NonNull;
-use core::ptr;
 use core::slice;
 use core::str;
+use ptr_monotype::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -45,8 +45,8 @@ pub struct Arena {
   //
   // It follows that it is always sound to read from these fields.
 
-  lo: UnsafeCell<*mut u8>,
-  hi: UnsafeCell<*mut Footer>,
+  lo: UnsafeCell<ptr>,
+  hi: UnsafeCell<ptr>,
 }
 
 /// A view of an arena for allocating objects with a particular lifetime.
@@ -60,7 +60,6 @@ pub struct Allocator<'a>(
 /// A shareable reference to an arena for allocating objects with a particular
 /// lifetime.
 
-#[cfg(feature = "allocator_api")]
 #[derive(Clone, Copy)]
 #[repr(transparent)]
 pub struct AllocatorRef<'a>(
@@ -94,7 +93,7 @@ pub struct AllocError;
 enum Void {}
 
 struct Footer {
-  next: Option<NonNull<Footer>>,
+  next: ptr,
   total_allocated: usize,
   layout: Layout,
 }
@@ -106,8 +105,13 @@ trait FromError {
 
 struct InvariantLifetime<'a>(fn(&'a ()) -> &'a ());
 
-#[cfg(feature = "allocator_api")]
 struct NotSendNotSync(*const ());
+
+unsafe trait AllocMemory<'a> {
+  fn alloc_memory<E>(self, layout: Layout) -> Result<ptr, E>
+  where
+    E: FromError;
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -136,22 +140,6 @@ const WORD_ALIGN: usize = align_of::<usize>();
 #[inline(always)]
 const fn max(x: usize, y: usize) -> usize {
   if x >= y { x } else { y }
-}
-
-#[inline(always)]
-fn invalid_mut<T>(addr: usize) -> *mut T {
-  unsafe { core::mem::transmute(addr) }
-}
-
-#[inline(always)]
-fn addr<T: ?Sized>(p: *const T) -> usize {
-  let p = p as *const ();
-  unsafe { core::mem::transmute(p) }
-}
-
-#[inline(always)]
-fn mask(p: *mut u8, mask: usize) -> *mut u8 {
-  p.wrapping_sub(addr(p) & ! mask)
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -220,7 +208,7 @@ unsafe impl Send for Arena {}
 
 unsafe impl Sync for Arena {}
 
-unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
+unsafe fn dealloc_chunk_list(p: ptr) {
   // SAFETY:
   //
   // `p` must be the head of a valid linked list of chunks.
@@ -230,16 +218,15 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
   // Chunk sizes grow exponentially, so stack usage is O(log(word size)) at
   // worst even without TCO.
 
-  let q = unsafe { p.as_ref() }.next;
-  let l = unsafe { p.as_ref() }.layout;
-  let p = p.as_ptr();
-  let p = p as *mut u8;
-  let p = p.wrapping_add(FOOTER_SIZE).wrapping_sub(l.size());
+  let f = unsafe { p.as_ref::<Footer>() };
+  let q = f.next;
+  let l = f.layout;
+  let p = p + FOOTER_SIZE - l.size();
 
-  unsafe { alloc::alloc::dealloc(p, l) }
+  unsafe { ptr::dealloc(p, l) }
 
-  if let Some(p) = q {
-    unsafe { dealloc_chunk_list(p) }
+  if ! q.is_null() {
+    unsafe { dealloc_chunk_list(q) }
   }
 }
 
@@ -247,11 +234,11 @@ unsafe fn dealloc_chunk_list(p: NonNull<Footer>) {
 #[cold]
 unsafe fn alloc_chunk_for<E>
   (
-    lo: *mut u8,
-    hi: *mut Footer,
+    lo: ptr,
+    hi: ptr,
     object: Layout,
   )
-  -> Result<(*mut u8, *mut Footer), E>
+  -> Result<(ptr, ptr), E>
 where
   E: FromError
 {
@@ -275,12 +262,13 @@ where
   const _: () = assert!(FOOTER_ALIGN <= MIN_CHUNK_ALIGN);
 
   let _ = hint::black_box(lo);
-  let chunks = NonNull::new(hi);
+  let chunks = hi;
 
   let total_allocated =
-    match chunks {
-      None => 0,
-      Some(f) => unsafe { f.as_ref() }.total_allocated
+    if chunks.is_null() {
+      0
+    } else {
+      unsafe { chunks.as_ref::<Footer>() }.total_allocated
     };
 
   let object_size = object.size();
@@ -324,7 +312,7 @@ where
   //
   // - `size != 0`
 
-  let lo = unsafe { alloc::alloc::alloc(layout) };
+  let lo = unsafe { ptr::alloc(layout) };
 
   if lo.is_null() {
     return Err(E::global_alloc_error(layout));
@@ -335,7 +323,7 @@ where
   // `align_of::<Footer>(), so we can place the tail at the very end of the
   // chunk.
 
-  let hi = lo.wrapping_add(size).wrapping_sub(FOOTER_SIZE) as *mut Footer;
+  let hi = lo + size - FOOTER_SIZE;
 
   let total_allocated = total_allocated.saturating_add(size);
 
@@ -345,7 +333,7 @@ where
   //
   // - `hi` is valid and aligned for writing a `Footer`.
 
-  unsafe { ptr::write(hi, f) };
+  unsafe { hi.set(f) };
 
   Ok((lo, hi))
 }
@@ -363,8 +351,8 @@ impl Arena {
     // underflow `isize` in the capacity calculation.
 
     Self {
-      lo: UnsafeCell::new(invalid_mut(1)),
-      hi: UnsafeCell::new(invalid_mut(0)),
+      lo: UnsafeCell::new(ptr::invalid(1)),
+      hi: UnsafeCell::new(ptr::invalid(0)),
     }
   }
 
@@ -383,15 +371,12 @@ impl Arena {
     // accessible `Allocator` to have an appropriately restricted lifetime
     // parameter.
 
-    let p = self as *mut _;
-    let p = p as *mut _;
-
     // SAFETY:
     //
     // The soundness of this cast depends on the fact that `Allocator` is
     // `#[repr(transparent)]` with an `Arena` field.
 
-    unsafe { &mut *p }
+    unsafe { ptr::new(self).as_mut_ref() }
   }
 
   /// Gets a handle with which to allocate objects from the arena. The lifetime
@@ -400,7 +385,6 @@ impl Arena {
   /// In contrast with the handle returned by `allocator_mut`, this handle can
   /// be shared but can't be sent to a different thread.
 
-  #[cfg(feature = "allocator_api")]
   #[inline(always)]
   pub fn allocator_ref(&mut self) -> AllocatorRef<'_> {
     // Unlike with the handle returned by `allocator_mut`, we only need one
@@ -437,21 +421,22 @@ impl Arena {
     let p = *hi;
 
     if ! p.is_null() {
-      let f = unsafe { &mut *p };
-      let p = p as *mut u8;
-      let p = p.wrapping_add(FOOTER_SIZE).wrapping_sub(f.layout.size());
+      let f = unsafe { p.as_mut_ref::<Footer>() };
+      let q = f.next;
+      let l = f.layout;
+      let p = p + FOOTER_SIZE - l.size();
 
       *lo = p;
 
-      if let Some(next) = f.next {
-        f.next = None;
-        unsafe { dealloc_chunk_list(next) }
+      if ! q.is_null() {
+        f.next = ptr::NULL;
+        unsafe { dealloc_chunk_list(q) }
       }
     }
   }
 
   #[inline(always)]
-  fn alloc<E>(&mut self, layout: Layout) -> Result<NonNull<u8>, E>
+  fn alloc<E>(&mut self, layout: Layout) -> Result<ptr, E>
   where
     E: FromError
   {
@@ -464,9 +449,9 @@ impl Arena {
     let p = *lo;
     let q = *hi;
 
-    let p = mask(p.wrapping_add(align - 1), ! (align - 1));
+    let p = (p + (align - 1)) & ! (align - 1);
 
-    if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
+    if size as isize > (q - p) as isize {
       let (p, q) = unsafe { alloc_chunk_for::<E>(p, q, layout) }?;
       *lo = p;
       *hi = q;
@@ -475,17 +460,14 @@ impl Arena {
     }
 
     let p = *lo;
-    let r = unsafe { NonNull::new_unchecked(p) };
-    let p = p.wrapping_add(size);
 
-    *lo = p;
+    *lo = p + size;
 
-    Ok(r)
+    Ok(p)
   }
 
-  #[cfg(feature = "allocator_api")]
   #[inline(always)]
-  unsafe fn alloc_shared<E>(&self, layout: Layout) -> Result<NonNull<u8>, E>
+  unsafe fn alloc_shared<E>(&self, layout: Layout) -> Result<ptr, E>
   where
     E: FromError
   {
@@ -500,31 +482,29 @@ impl Arena {
     let lo = self.lo.get();
     let hi = self.hi.get();
 
-    let p = unsafe { ptr::read(lo) };
-    let q = unsafe { ptr::read(hi) };
+    let p = unsafe { core::ptr::read(lo) };
+    let q = unsafe { core::ptr::read(hi) };
 
-    let p = mask(p.wrapping_add(align - 1), ! (align - 1));
+    let p = (p + (align - 1)) & ! (align - 1);
 
-    if size as isize > addr(q).wrapping_sub(addr(p)) as isize {
+    if size as isize > (q - p) as isize {
       let (p, q) = unsafe { alloc_chunk_for::<E>(p, q, layout) }?;
-      unsafe { ptr::write(lo, p) };
-      unsafe { ptr::write(hi, q) };
+      unsafe { core::ptr::write(lo, p) };
+      unsafe { core::ptr::write(hi, q) };
     } else {
-      unsafe { ptr::write(lo, p) };
+      unsafe { core::ptr::write(lo, p) };
     }
 
-    let p = unsafe { ptr::read(lo) };
-    let r = unsafe { NonNull::new_unchecked(p) };
-    let p = p.wrapping_add(size);
+    let p = unsafe { core::ptr::read(lo) };
 
-    unsafe { ptr::write(lo, p) };
+    unsafe { core::ptr::write(lo, p + size) };
 
-    Ok(r)
+    Ok(p)
   }
 
   fn debug(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
-    let lo = unsafe { ptr::read(self.lo.get()) };
-    let hi = unsafe { ptr::read(self.hi.get()) };
+    let lo = unsafe { core::ptr::read(self.lo.get()) };
+    let hi = unsafe { core::ptr::read(self.hi.get()) };
 
     f.debug_struct(name).field("lo", &lo).field("hi", &hi).finish()
   }
@@ -532,9 +512,9 @@ impl Arena {
 
 impl Drop for Arena {
   fn drop(&mut self) {
-    let hi = self.hi.get_mut();
+    let p = *self.hi.get_mut();
 
-    if let Some(p) = NonNull::new(*hi) {
+    if ! p.is_null() {
       unsafe { dealloc_chunk_list(p) }
     }
   }
@@ -555,143 +535,158 @@ impl fmt::Debug for Arena {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
+// ALLOCATION FUNCTIONS
+//
+////////////////////////////////////////////////////////////////////////////////
+
+#[inline(always)]
+fn alloc<'a, S, T, E>(allocator: S) -> Result<Slot<'a, T>, E>
+where
+  S: AllocMemory<'a>,
+  E: FromError
+{
+  let p = allocator.alloc_memory(Layout::new::<T>())?;
+  let p = p.into();
+
+  // SAFETY:
+  //
+  // - The pointer is non-null and aligned, even if `size == 0`.
+  // - The memory has the correct size.
+  // - The memory is not aliased by any other reference.
+  // - The memory is live for the duration of the assigned lifetime.
+
+  Ok(unsafe { Slot::new(p) })
+}
+
+#[inline(always)]
+fn alloc_slice<'a, S, T, E>(allocator: S, len: usize) -> Result<Slot<'a, [T]>, E>
+where
+  S: AllocMemory<'a>,
+  E: FromError
+{
+  let size_of_element = size_of::<T>();
+  let align = align_of::<T>();
+
+  // Because `size_of::<T>() % align_of::<T>() == 0` for all types `T`, we
+  // don't need to consider the case where rounding the size up to the
+  // alignment exceeds `isize::MAX`.
+
+  if size_of_element != 0 && len > isize::MAX as usize / size_of_element {
+    return Err(E::layout_overflow());
+  }
+
+  let size = size_of_element * len;
+  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+
+  let p = allocator.alloc_memory(layout)?;
+  let p = core::ptr::slice_from_raw_parts_mut(p.into(), len);
+
+  // SAFETY:
+  //
+  // - The pointer is non-null and aligned, even if `size == 0`.
+  // - The memory has the correct size.
+  // - The memory is not aliased by any other reference.
+  // - The memory is live for the duration of the assigned lifetime.
+
+  Ok(unsafe { Slot::new(p) })
+}
+
+#[inline(always)]
+fn alloc_layout<'a, S, E>(allocator: S, layout: Layout) -> Result<Slot<'a, [u8]>, E>
+where
+  S: AllocMemory<'a>,
+  E: FromError
+{
+  let p = allocator.alloc_memory(layout)?;
+  let p = core::ptr::slice_from_raw_parts_mut(p.into(), layout.size());
+
+  // SAFETY:
+  //
+  // - The pointer is non-null and aligned, even if `size == 0`.
+  // - The memory has the correct size.
+  // - The memory is not aliased by any other reference.
+  // - The memory is live for the duration of the assigned lifetime.
+
+  Ok(unsafe { Slot::new(p) })
+}
+
+#[inline(always)]
+fn copy_slice<'a, S, T, E>(allocator: S, src: &[T]) -> Result<&'a mut [T], E>
+where
+  S: AllocMemory<'a>,
+  T: Copy,
+  E: FromError
+{
+  // `Copy` implies `!Drop`.
+
+  let size_of_element = size_of::<T>();
+  let align = align_of::<T>();
+  let n = src.len();
+  let size = size_of_element * n;
+
+  // SAFETY:
+  //
+  // The existence of `src` implies that we'll construct a valid layout.
+
+  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+
+  let p = allocator.alloc_memory(layout)?;
+  let q = ptr::new(src);
+
+  // SAFETY:
+  //
+  // - The `src` argument is valid for reading `T`s.
+  // - The `dst` argument is valid for writing `T`s.
+  // - The `src` and `dst` regions do not overlap.
+  //
+  // Note that the above holds, and in particular that the pointers are
+  // non-null and aligned, even if we need to do a zero-byte read and write.
+
+  unsafe { ptr::copy_nonoverlapping::<T>(q, p, n) };
+
+  // SAFETY:
+  //
+  // - The pointer is non-null and aligned, even if `size == 0`.
+  // - The memory has the correct size.
+  // - The memory is not aliased by any other reference.
+  // - The memory is live for the duration of the assigned lifetime.
+  // - The memory is initialized.
+
+  Ok(unsafe { p.as_slice_mut_ref(n) })
+}
+
+#[inline(always)]
+fn copy_str<'a, S, E>(allocator: S, src: &str) -> Result<&'a mut str, E>
+where
+  S: AllocMemory<'a>,
+  E: FromError
+{
+  let p = copy_slice(allocator, src.as_bytes())?;
+
+  // SAFETY:
+  //
+  // The byte array is valid UTF-8 because `src` was valid UTF-8.
+
+  Ok(unsafe { str::from_utf8_unchecked_mut(p) })
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
 // Allocator
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+unsafe impl<'a> AllocMemory<'a> for &mut Allocator<'a> {
+  #[inline(always)]
+  fn alloc_memory<E>(self, layout: Layout) -> Result<ptr, E>
+  where
+    E: FromError
+  {
+    self.0.alloc(layout)
+  }
+}
+
 impl<'a> Allocator<'a> {
-  #[inline(always)]
-  fn gen_alloc<T, E>(&mut self) -> Result<Slot<'a, T>, E>
-  where
-    E: FromError
-  {
-    let p = self.0.alloc::<E>(Layout::new::<T>())?;
-    let p = p.as_ptr();
-    let p = p as *mut _;
-
-    // SAFETY:
-    //
-    // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size.
-    // - The memory is not aliased by any other reference.
-    // - The memory is live for the duration of the assigned lifetime.
-
-    Ok(unsafe { Slot::new(p) })
-  }
-
-  #[inline(always)]
-  fn gen_alloc_slice<T, E>(&mut self, len: usize) -> Result<Slot<'a, [T]>, E>
-  where
-    E: FromError
-  {
-    let size_of_element = size_of::<T>();
-    let align = align_of::<T>();
-
-    // Because `size_of::<T>() % align_of::<T>() == 0` for all types `T`, we
-    // don't need to consider the case where rounding the size up to the
-    // alignment exceeds `isize::MAX`.
-
-    if size_of_element != 0 && len > isize::MAX as usize / size_of_element {
-      return Err(E::layout_overflow());
-    }
-
-    let size = size_of_element * len;
-    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-
-    let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr();
-    let p = p as *mut _;
-    let p = ptr::slice_from_raw_parts_mut(p, len);
-
-    // SAFETY:
-    //
-    // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size.
-    // - The memory is not aliased by any other reference.
-    // - The memory is live for the duration of the assigned lifetime.
-
-    Ok(unsafe { Slot::new(p) })
-  }
-
-  #[inline(always)]
-  fn gen_alloc_layout<E>(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, E>
-  where
-    E: FromError
-  {
-    let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr();
-    let p = ptr::slice_from_raw_parts_mut(p, layout.size());
-
-    // SAFETY:
-    //
-    // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size.
-    // - The memory is not aliased by any other reference.
-    // - The memory is live for the duration of the assigned lifetime.
-
-    Ok(unsafe { Slot::new(p) })
-  }
-
-  #[inline(always)]
-  fn gen_copy_slice<T, E>(&mut self, src: &[T]) -> Result<&'a mut [T], E>
-  where
-    T: Copy,
-    E: FromError
-  {
-    // `Copy` implies `!Drop`.
-
-    let size_of_element = size_of::<T>();
-    let align = align_of::<T>();
-    let n = src.len();
-    let size = size_of_element * n;
-
-    // SAFETY:
-    //
-    // The existence of `src` implies that we'll construct a valid layout.
-
-    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-
-    let p = self.0.alloc::<E>(layout)?;
-    let p = p.as_ptr();
-    let p = p as *mut _;
-    let q = src.as_ptr();
-
-    // SAFETY:
-    //
-    // - The `src` argument is valid for reading `T`s.
-    // - The `dst` argument is valid for writing `T`s.
-    // - The `src` and `dst` regions do not overlap.
-    //
-    // Note that the above holds, and in particular that the pointers are
-    // non-null and aligned, even if we need to do a zero-byte read and write.
-
-    unsafe { ptr::copy_nonoverlapping(q, p, n) };
-
-    // SAFETY:
-    //
-    // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size.
-    // - The memory is not aliased by any other reference.
-    // - The memory is live for the duration of the assigned lifetime.
-    // - The memory is initialized.
-
-    Ok(unsafe { slice::from_raw_parts_mut(p, n) })
-  }
-
-  #[inline(always)]
-  fn gen_copy_str<E>(&mut self, src: &str) -> Result<&'a mut str, E>
-  where
-    E: FromError
-  {
-    let p = self.gen_copy_slice(src.as_bytes())?;
-
-    // SAFETY:
-    //
-    // The byte array is valid UTF-8 because `src` was valid UTF-8.
-
-    Ok(unsafe { str::from_utf8_unchecked_mut(p) })
-  }
-
   /// Allocates memory for a single object.
   ///
   /// # Panics
@@ -700,7 +695,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
-    Void::unwrap(self.gen_alloc())
+    Void::unwrap(alloc(self))
   }
 
   /// Allocates memory for a single object.
@@ -709,10 +704,9 @@ impl<'a> Allocator<'a> {
   ///
   /// An error is returned on failure to allocate memory.
 
-
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
-    self.gen_alloc()
+    alloc(self)
   }
 
   /// Allocates memory for a slice of the given length.
@@ -723,7 +717,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
-    Void::unwrap(self.gen_alloc_slice(len))
+    Void::unwrap(alloc_slice(self, len))
   }
 
   /// Allocates memory for a slice of the given length.
@@ -734,7 +728,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
-    self.gen_alloc_slice(len)
+    alloc_slice(self, len)
   }
 
   /// Allocates memory for the given layout.
@@ -745,7 +739,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> Slot<'a, [u8]> {
-    Void::unwrap(self.gen_alloc_layout(layout))
+    Void::unwrap(alloc_layout(self, layout))
   }
 
   /// Allocates memory for the given layout.
@@ -756,7 +750,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<Slot<'a, [u8]>, AllocError> {
-    self.gen_alloc_layout(layout)
+    alloc_layout(self, layout)
   }
 
   /// Copies the slice into a new allocation.
@@ -770,7 +764,7 @@ impl<'a> Allocator<'a> {
   where
     T: Copy
   {
-    Void::unwrap(self.gen_copy_slice(src))
+    Void::unwrap(copy_slice(self, src))
   }
 
   /// Copies the slice into a new allocation.
@@ -784,7 +778,7 @@ impl<'a> Allocator<'a> {
   where
     T: Copy
   {
-    self.gen_copy_slice(src)
+    copy_slice(self, src)
   }
 
   /// Copies the string into a new allocation.
@@ -795,7 +789,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
-    Void::unwrap(self.gen_copy_str(src))
+    Void::unwrap(copy_str(self, src))
   }
 
   /// Copies the string into a new allocation.
@@ -806,7 +800,7 @@ impl<'a> Allocator<'a> {
 
   #[inline(always)]
   pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
-    self.gen_copy_str(src)
+    copy_str(self, src)
   }
 }
 
@@ -822,6 +816,145 @@ impl fmt::Debug for Allocator<'_> {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+unsafe impl<'a> AllocMemory<'a> for AllocatorRef<'a> {
+  #[inline(always)]
+  fn alloc_memory<E>(self, layout: Layout) -> Result<ptr, E>
+  where
+    E: FromError
+  {
+    // SAFETY:
+    //
+    // No other reference to the `Arena` is currently live in a different
+    // thread.
+
+    unsafe { self.0.alloc_shared(layout) }
+  }
+}
+
+impl<'a> AllocatorRef<'a> {
+  /// Allocates memory for a single object.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn alloc<T>(self) -> Slot<'a, T> {
+    Void::unwrap(alloc(self))
+  }
+
+  /// Allocates memory for a single object.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn try_alloc<T>(self) -> Result<Slot<'a, T>, AllocError> {
+    alloc(self)
+  }
+
+  /// Allocates memory for a slice of the given length.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn alloc_slice<T>(self, len: usize) -> Slot<'a, [T]> {
+    Void::unwrap(alloc_slice(self, len))
+  }
+
+  /// Allocates memory for a slice of the given length.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn try_alloc_slice<T>(self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
+    alloc_slice(self, len)
+  }
+
+  /// Allocates memory for the given layout.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn alloc_layout(self, layout: Layout) -> Slot<'a, [u8]> {
+    Void::unwrap(alloc_layout(self, layout))
+  }
+
+  /// Allocates memory for the given layout.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn try_alloc_layout(self, layout: Layout) -> Result<Slot<'a, [u8]>, AllocError> {
+    alloc_layout(self, layout)
+  }
+
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn copy_slice<T>(self, src: &[T]) -> &'a mut [T]
+  where
+    T: Copy
+  {
+    Void::unwrap(copy_slice(self, src))
+  }
+
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn try_copy_slice<T>(self, src: &[T]) -> Result<&'a mut [T], AllocError>
+  where
+    T: Copy
+  {
+    copy_slice(self, src)
+  }
+
+  /// Copies the string into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn copy_str(self, src: &str) -> &'a mut str {
+    Void::unwrap(copy_str(self, src))
+  }
+
+  /// Copies the string into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
+  #[inline(always)]
+  pub fn try_copy_str(self, src: &str) -> Result<&'a mut str, AllocError> {
+    copy_str(self, src)
+  }
+}
+
+impl fmt::Debug for AllocatorRef<'_> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    self.0.debug(f, "Allocator")
+  }
+}
+
 #[cfg(feature = "allocator_api")]
 impl FromError for alloc::alloc::AllocError {
   #[inline(always)]
@@ -829,13 +962,6 @@ impl FromError for alloc::alloc::AllocError {
 
   #[inline(always)]
   fn layout_overflow() -> Self { Self {} }
-}
-
-#[cfg(feature = "allocator_api")]
-impl fmt::Debug for AllocatorRef<'_> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    self.0.debug(f, "Allocator")
-  }
 }
 
 #[cfg(feature = "allocator_api")]
@@ -847,9 +973,8 @@ unsafe impl<'a> alloc::alloc::Allocator for AllocatorRef<'a> {
     // No other reference to the `Arena` is currently live in a different
     // thread.
 
-    let p = unsafe { self.0.alloc_shared::<alloc::alloc::AllocError>(layout) }?;
-    let p = p.as_ptr();
-    let p = ptr::slice_from_raw_parts_mut(p, layout.size());
+    let p = self.alloc_memory::<alloc::alloc::AllocError>(layout)?;
+    let p = p.as_slice_mut_ptr(layout.size());
 
     Ok(unsafe { NonNull::new_unchecked(p) })
   }
@@ -907,22 +1032,6 @@ where
 
     Self(unsafe { NonNull::new_unchecked(pointer) }, PhantomData)
   }
-
-  /// Converts the slot into a non-null pointer to its underlying memory.
-  ///
-  /// The pointer is properly aligned.
-
-  pub fn as_non_null(self) -> NonNull<T> {
-    self.0
-  }
-
-  /// Converts the slot into a pointer to its underlying memory.
-  ///
-  /// The pointer is non-null and properly aligned.
-
-  pub fn as_ptr(self) -> *mut T {
-    self.0.as_ptr()
-  }
 }
 
 impl<'a, T> Slot<'a, T> {
@@ -930,14 +1039,13 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = self.0.as_ptr();
-    let p = p as *mut _;
+    let p = ptr::new(self.0.as_ptr());
 
     // SAFETY:
     //
     // The pointed-to memory is valid for `T`, though uninitialized.
 
-    unsafe { &mut *p }
+    unsafe { p.as_mut_ref() }
   }
 
   /// Initializes the object with the given value.
