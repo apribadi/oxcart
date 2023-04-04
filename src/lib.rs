@@ -24,7 +24,6 @@ use core::mem::align_of;
 use core::mem::needs_drop;
 use core::mem::size_of;
 use core::panic::RefUnwindSafe;
-use core::ptr::NonNull;
 use core::str;
 use ptr_monotype::ptr;
 
@@ -72,9 +71,10 @@ pub struct AllocatorRef<'a>(
 /// Typically you will initialize the slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
 
-#[repr(transparent)]
-pub struct Slot<'a, T: 'a + ?Sized>(
-  NonNull<T>,
+pub struct Slot<'a, T: ?Sized + Pointee>(
+  ptr,
+  T::Metadata,
+  PhantomData<Invariant<T>>,
   PhantomData<InvariantLifetime<'a>>,
 );
 
@@ -82,6 +82,15 @@ pub struct Slot<'a, T: 'a + ?Sized>(
 
 #[derive(Debug)]
 pub struct AllocError;
+
+/// Polyfill for the unstable [`core::ptr::Pointee`] trait.
+
+pub trait Pointee {
+  /// The type for metadata in pointers and references to Self.
+
+  type Metadata: Copy + Send + Sync + Ord + core::hash::Hash + Unpin;
+}
+
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -102,6 +111,8 @@ trait FromError {
   fn layout_overflow() -> Self;
 }
 
+struct Invariant<T: ?Sized>(fn(T) -> T);
+
 struct InvariantLifetime<'a>(fn(&'a ()) -> &'a ());
 
 struct NotSendNotSync(*const ());
@@ -110,6 +121,14 @@ unsafe trait AllocMemory<'a> {
   fn alloc_memory<E>(self, layout: Layout) -> Result<ptr, E>
   where
     E: FromError;
+}
+
+impl<T> Pointee for T {
+  type Metadata = ();
+}
+
+impl<T> Pointee for [T] {
+  type Metadata = usize;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -249,8 +268,8 @@ where
   //
   // If this function returns `Ok(_)`, then it has allocated a new chunk and
   // placed it at the head of linked list whose previous head was `hi`.
-  // Additionally, the first (`*mut u8`) pointer points to memory suitable for
-  // the start of an object with layout `object`.
+  // Additionally, the first  pointer points to memory suitable for the start
+  // of an object with layout `object`.
   //
   // If this function returns `Err(_)`, then the linked list of chunks is
   // unmodified.
@@ -363,7 +382,7 @@ impl Arena {
     // The type `&'a mut Allocator<'b>` has two lifetimes, which, during usage,
     // can differ from each other due to reborrowing.
 
-    let p = ptr::from(self);
+    let p = ptr::new(self);
 
     // SAFETY:
     //
@@ -549,7 +568,6 @@ where
   E: FromError
 {
   let p = allocator.alloc_memory(Layout::new::<T>())?;
-  let p = p.into();
 
   // SAFETY:
   //
@@ -558,7 +576,7 @@ where
   // - The memory is not aliased by any other reference.
   // - The memory is live for the duration of the assigned lifetime.
 
-  Ok(unsafe { Slot::new(p) })
+  Ok(unsafe { Slot::new(p, ()) })
 }
 
 #[inline(always)]
@@ -590,7 +608,7 @@ where
   // - The memory is not aliased by any other reference.
   // - The memory is live for the duration of the assigned lifetime.
 
-  Ok(unsafe { Slot::new_slice(p, len) })
+  Ok(unsafe { Slot::new(p, len) })
 }
 
 #[inline(always)]
@@ -608,7 +626,7 @@ where
   // - The memory is not aliased by any other reference.
   // - The memory is live for the duration of the assigned lifetime.
 
-  Ok(unsafe { Slot::new_slice(p, layout.size()) })
+  Ok(unsafe { Slot::new(p, layout.size()) })
 }
 
 #[inline(always)]
@@ -632,7 +650,7 @@ where
   let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
   let p = allocator.alloc_memory(layout)?;
-  let q = ptr::from(src);
+  let q = ptr::new(src);
 
   // SAFETY:
   //
@@ -968,20 +986,20 @@ impl FromError for alloc::alloc::AllocError {
 #[cfg(feature = "allocator_api")]
 unsafe impl<'a> alloc::alloc::Allocator for AllocatorRef<'a> {
   #[inline(always)]
-  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, alloc::alloc::AllocError> {
+  fn allocate(&self, layout: Layout) -> Result<core::ptr::NonNull<[u8]>, alloc::alloc::AllocError> {
     // SAFETY:
     //
     // No other reference to the `Arena` is currently live in a different
     // thread.
 
     let p = self.alloc_memory::<alloc::alloc::AllocError>(layout)?;
-    let p = core::ptr::slice_from_raw_parts_mut(p.into(), layout.size());
+    let p = p.as_slice_mut_ptr(layout.size());
 
-    Ok(unsafe { NonNull::new_unchecked(p) })
+    Ok(unsafe { core::ptr::NonNull::new_unchecked(p) })
   }
 
   #[inline(always)]
-  unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+  unsafe fn deallocate(&self, ptr: core::ptr::NonNull<u8>, layout: Layout) {
     let _ = self;
     let _ = ptr;
     let _ = layout;
@@ -1005,9 +1023,9 @@ fn panic_type_needs_drop() -> ! {
 // The `Slot` type conforms to the usual shared xor mutable discipline,
 // despite containing a pointer.
 
-unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized + Send {}
+unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized + Pointee + Send {}
 
-unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized + Sync {}
+unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized + Pointee + Sync {}
 
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1017,10 +1035,8 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
   }
 }
 
-impl<'a, T> Slot<'a, T> {
-  unsafe fn new(p: ptr) -> Self {
-    let p = p.into();
-
+impl<'a, T: ?Sized + Pointee> Slot<'a, T> {
+  unsafe fn new(p: ptr, m: T::Metadata) -> Self {
     // SAFETY:
     //
     // To satisfy invariants for `Slot`, we require that
@@ -1030,9 +1046,16 @@ impl<'a, T> Slot<'a, T> {
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Self(unsafe { NonNull::new_unchecked(p) }, PhantomData)
+    Self(
+      p,
+      m,
+      PhantomData,
+      PhantomData,
+    )
   }
+}
 
+impl<'a, T> Slot<'a, T> {
   /// Converts the slot into a reference to an uninitialized value.
 
   #[inline(always)]
@@ -1101,7 +1124,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       let _: _ = elt.write(f(i));
     }
 
-    let p = ptr::from(p);
+    let p = ptr::new(p);
 
     // SAFETY:
     //
@@ -1112,33 +1135,18 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 }
 
 impl<'a, T> Slot<'a, [T]> {
-  unsafe fn new_slice(p: ptr, len: usize) -> Self {
-    let p = core::ptr::slice_from_raw_parts_mut(p.into(), len);
-
-    // SAFETY:
-    //
-    // To satisfy invariants for `Slot`, we require that
-    //
-    // - The pointer is non-null and aligned, even if `size == 0`.
-    // - The memory has the correct size.
-    // - The memory is not aliased by any other reference.
-    // - The memory is live for the duration of the assigned lifetime.
-
-    Self(unsafe { NonNull::new_unchecked(p) }, PhantomData)
-  }
-
   /// The length of the slice (in items, not bytes) occupying the slot.
 
   #[inline(always)]
   pub fn len(&self) -> usize {
-    self.0.len()
+    self.1
   }
 
   /// Converts the slot into a reference to a slice of uninitialized values.
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    let n = self.0.len();
+    let n = self.1;
     let p = ptr::from(self.0);
 
     // SAFETY:
