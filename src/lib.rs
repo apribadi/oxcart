@@ -59,7 +59,6 @@ pub struct Allocator<'a>(
 /// lifetime.
 
 #[derive(Clone, Copy)]
-#[repr(transparent)]
 pub struct AllocatorRef<'a>(
   &'a Arena,
   PhantomData<InvariantLifetime<'a>>,
@@ -86,11 +85,9 @@ pub struct AllocError;
 /// Polyfill for the unstable [`core::ptr::Pointee`] trait.
 
 pub trait Pointee {
-  /// The type for metadata in pointers and references to Self.
-
-  type Metadata: Copy + Send + Sync + Ord + core::hash::Hash + Unpin;
+  #[allow(missing_docs)]
+  type Metadata: Copy + Send + Sync + Unpin;
 }
-
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -221,8 +218,6 @@ impl RefUnwindSafe for Arena {}
 // SAFETY:
 //
 // See safety comment on the `struct Arena` type declaration.
-
-unsafe impl Send for Arena {}
 
 unsafe impl Sync for Arena {}
 
@@ -382,7 +377,7 @@ impl Arena {
     // The type `&'a mut Allocator<'b>` has two lifetimes, which, during usage,
     // can differ from each other due to reborrowing.
 
-    let p = ptr::new(self);
+    let p = ptr::from(self);
 
     // SAFETY:
     //
@@ -650,7 +645,7 @@ where
   let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
 
   let p = allocator.alloc_memory(layout)?;
-  let q = ptr::new(src);
+  let q = ptr::from(src);
 
   // SAFETY:
   //
@@ -1018,25 +1013,14 @@ fn panic_type_needs_drop() -> ! {
   panic!("cannot initialize arena slot with a type that needs drop")
 }
 
-// SAFETY:
-//
-// The `Slot` type conforms to the usual shared xor mutable discipline,
-// despite containing a pointer.
-
-unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized + Pointee + Send {}
-
-unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized + Pointee + Sync {}
-
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_tuple("Slot")
-      .field(&self.0)
-      .finish()
+    f.debug_tuple("Slot").field(&self.0).finish()
   }
 }
 
 impl<'a, T: ?Sized + Pointee> Slot<'a, T> {
-  unsafe fn new(p: ptr, m: T::Metadata) -> Self {
+  unsafe fn new(p: ptr, meta: T::Metadata) -> Self {
     // SAFETY:
     //
     // To satisfy invariants for `Slot`, we require that
@@ -1046,12 +1030,7 @@ impl<'a, T: ?Sized + Pointee> Slot<'a, T> {
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Self(
-      p,
-      m,
-      PhantomData,
-      PhantomData,
-    )
+    Self(p, meta, PhantomData, PhantomData)
   }
 }
 
@@ -1124,7 +1103,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       let _: _ = elt.write(f(i));
     }
 
-    let p = ptr::new(p);
+    let p = ptr::from(p);
 
     // SAFETY:
     //

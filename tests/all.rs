@@ -115,8 +115,10 @@ fn test_types_are_send_and_sync() {
   fn is_sync<T: Sync>(_ : &T) {}
   let mut arena = Arena::new();
   is_send::<Arena>(&arena);
+  is_sync::<Arena>(&arena);
   let allocator = arena.allocator_mut();
   is_send::<Allocator>(allocator);
+  is_sync::<Allocator>(allocator);
   let x = allocator.alloc::<u64>();
   let y = allocator.alloc_slice::<u64>(5);
   is_send::<Slot<_>>(&x);
