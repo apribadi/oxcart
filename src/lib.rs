@@ -25,7 +25,7 @@ use core::mem::needs_drop;
 use core::mem::size_of;
 use core::panic::RefUnwindSafe;
 use core::str;
-use ptr_monotype::ptr;
+use untyped_pointer::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -70,12 +70,14 @@ pub struct AllocatorRef<'a>(
 /// Typically you will initialize the slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
 
-pub struct Slot<'a, T: ?Sized + Pointee>(
+pub struct Slot<'a, T>(
   ptr,
   T::Metadata,
   PhantomData<Invariant<T>>,
   PhantomData<InvariantLifetime<'a>>,
-);
+)
+where
+  T: Pointee + ?Sized;
 
 /// A failed allocation from the arena.
 
@@ -108,7 +110,7 @@ trait FromError {
   fn layout_overflow() -> Self;
 }
 
-struct Invariant<T: ?Sized>(fn(T) -> T);
+struct Invariant<T>(fn(T) -> T) where T: ?Sized;
 
 struct InvariantLifetime<'a>(fn(&'a ()) -> &'a ());
 
@@ -221,6 +223,14 @@ impl RefUnwindSafe for Arena {}
 
 unsafe impl Sync for Arena {}
 
+unsafe fn ptr_alloc(l: Layout) -> ptr {
+  ptr::from(unsafe { alloc::alloc::alloc(l) })
+}
+
+unsafe fn ptr_dealloc(p: ptr, l: Layout) {
+  unsafe { alloc::alloc::dealloc(p.as_mut_ptr(), l) }
+}
+
 unsafe fn dealloc_chunk_list(p: ptr) {
   // SAFETY:
   //
@@ -236,7 +246,7 @@ unsafe fn dealloc_chunk_list(p: ptr) {
   let l = f.layout;
   let p = p + FOOTER_SIZE - l.size();
 
-  unsafe { ptr::dealloc(p, l) }
+  unsafe { ptr_dealloc(p, l) }
 
   if ! q.is_null() {
     unsafe { dealloc_chunk_list(q) }
@@ -245,13 +255,7 @@ unsafe fn dealloc_chunk_list(p: ptr) {
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_chunk_for<E>
-  (
-    lo: ptr,
-    hi: ptr,
-    object: Layout,
-  )
-  -> Result<(ptr, ptr), E>
+unsafe fn alloc_chunk_for<E>(lo: ptr, hi: ptr, object: Layout) -> Result<(ptr, ptr), E>
 where
   E: FromError
 {
@@ -325,7 +329,7 @@ where
   //
   // - `size != 0`
 
-  let lo = unsafe { ptr::alloc(layout) };
+  let lo = unsafe { ptr_alloc(layout) };
 
   if lo.is_null() {
     return Err(E::global_alloc_error(layout));
@@ -346,7 +350,7 @@ where
   //
   // - `hi` is valid and aligned for writing a `Footer`.
 
-  unsafe { hi.set(f) };
+  unsafe { ptr::write(hi, f) };
 
   Ok((lo, hi))
 }
@@ -1019,8 +1023,11 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
   }
 }
 
-impl<'a, T: ?Sized + Pointee> Slot<'a, T> {
-  unsafe fn new(p: ptr, meta: T::Metadata) -> Self {
+impl<'a, T> Slot<'a, T>
+where
+  T: Pointee + ?Sized
+{
+  unsafe fn new(p: ptr, m: T::Metadata) -> Self {
     // SAFETY:
     //
     // To satisfy invariants for `Slot`, we require that
@@ -1030,7 +1037,7 @@ impl<'a, T: ?Sized + Pointee> Slot<'a, T> {
     // - The memory is not aliased by any other reference.
     // - The memory is live for the duration of the assigned lifetime.
 
-    Self(p, meta, PhantomData, PhantomData)
+    Self(p, m, PhantomData, PhantomData)
   }
 }
 

@@ -8,7 +8,7 @@ categories = ["memory-management"]
 description = "a fast arena allocator"
 
 [dependencies]
-ptr-monotype = { git = "https://github.com/apribadi/ptr-monotype.git" }
+untyped-pointer = { git = "https://github.com/apribadi/untyped-pointer.git" }
 
 [dev-dependencies]
 bumpalo = "3.12.0"
