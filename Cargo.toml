@@ -1,11 +1,21 @@
 [package]
-name = "oxcart"
-version = "0.2.0"
 authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
-license = "Artistic-2.0"
-edition = "2021"
 categories = ["memory-management"]
 description = "a fast arena allocator"
+edition = "2021"
+license = "Artistic-2.0"
+name = "oxcart"
+version = "0.3.0"
+
+[lints.rust]
+elided_lifetimes_in_paths = "warn"
+non_ascii_idents = "warn"
+trivial_numeric_casts = "warn"
+unreachable_pub = "warn"
+unsafe_op_in_unsafe_fn = "deny"
+unused_lifetimes = "warn"
+unused_qualifications = "warn"
+unused_results = "warn"
 
 [dependencies]
 untyped-pointer = { git = "https://github.com/apribadi/untyped-pointer.git" }

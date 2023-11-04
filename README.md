@@ -6,11 +6,14 @@ objects and then deallocating all of them at once.
 ## Example
 
 ```rust
-let mut arena = oxcart::Arena::new();
-let allocator = arena.allocator_mut();
+use oxcart::Arena;
+use oxcart::ArenaRef;
 
-let x: &mut u64 = allocator.alloc().init(13);
-let y: &mut [u64] = allocator.alloc_slice(5).init_slice(|i| i as u64);
+let mut arena = Arena::new();
+let mut arena_ref = &mut arena;
+
+let x: &mut u64 = arena_ref.alloc().init(13);
+let y: &mut [u64] = arena_ref.alloc_slice(5).init_slice(|i| i as u64);
 
 assert!(*x == 13);
 assert!(y == &[0, 1, 2, 3, 4]);
@@ -25,7 +28,6 @@ arena.reset();
 - allocation of slices, strings, and arbitrary layouts
 - allocation separated from initialization to avoid stack spills
 - reuse of memory after `reset`-ing an arena
-- `allocator_api` integration (under the `"allocator_api"` feature flag)
 - soundness
 - compatibility with strict provenance
 - zero dependencies
