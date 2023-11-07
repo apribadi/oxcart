@@ -49,11 +49,14 @@ fn bench_oxcart(iters: usize, len: usize) {
   let mut arena = oxcart::Arena::new();
 
   for _ in 0 .. iters {
-    {
-      let mut arena = &mut arena;
-      let _: _ = hint::black_box(make_list(&mut arena, len));
-    }
+    let mut arena = &mut arena;
+    let a: _ = hint::black_box(make_list(&mut arena, len));
+    let _ = a;
     arena.reset();
+    match a {
+      List::Nil => {}
+      List::Cons(Node { car, cdr: _ }) => { println!("{}", car); }
+    }
   }
 }
 

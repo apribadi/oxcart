@@ -1,28 +1,16 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
 
-#![deny(unsafe_op_in_unsafe_fn)]
-#![warn(elided_lifetimes_in_paths)]
-#![warn(missing_docs)]
-#![warn(non_ascii_idents)]
-#![warn(trivial_numeric_casts)]
-#![warn(unreachable_pub)]
-#![warn(unused_lifetimes)]
-#![warn(unused_qualifications)]
-#![warn(unused_results)]
-
 extern crate alloc;
 
 use core::alloc::Layout;
-use core::fmt;
-use core::hint;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::mem::align_of;
 use core::mem::needs_drop;
-use core::mem::size_of;
 use core::str;
-use untyped_pointer::ptr;
+use pop::Ptr;
+
+pub mod two;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -33,8 +21,8 @@ use untyped_pointer::ptr;
 /// An arena allocator.
 
 pub struct Arena {
-  lo: ptr,
-  hi: ptr,
+  lo: Ptr,
+  hi: Ptr,
 }
 
 /// An uninitialized slot in the arena.
@@ -43,7 +31,7 @@ pub struct Arena {
 /// [`init_slice`](Self::init_slice).
 
 pub struct Slot<'a, T>(
-  ptr,
+  Ptr,
   T::Metadata,
   PhantomData<(Invariant<T>, InvariantLifetime<'a>)>,
 )
@@ -169,8 +157,8 @@ impl<T> Pointee for [T] {
 enum Void {}
 
 struct Footer {
-  next: ptr,
-  total_allocated: usize,
+  next: Ptr,
+  total_allocated: isize,
   layout: Layout,
 }
 
@@ -190,16 +178,16 @@ struct InvariantLifetime<'a>(fn(&'a ()) -> &'a ());
 ////////////////////////////////////////////////////////////////////////////////
 
 #[cfg(not(test))]
-const MIN_CHUNK_SIZE_LOG2: usize = 12; // 4kb
+const MIN_CHUNK_SIZE_LOG2: u32 = 12; // 4kb
 
 #[cfg(test)]
-const MIN_CHUNK_SIZE_LOG2: usize = 6; // 64b
+const MIN_CHUNK_SIZE_LOG2: u32 = 6; // 64b
 
-const FOOTER_SIZE: usize = size_of::<Footer>();
-const FOOTER_ALIGN: usize = align_of::<Footer>();
-const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
-const MIN_CHUNK_ALIGN: usize = max(FOOTER_ALIGN, WORD_ALIGN);
-const WORD_ALIGN: usize = align_of::<usize>();
+const FOOTER_SIZE: isize = size_of::<Footer>();
+const FOOTER_ALIGN: isize = align_of::<Footer>();
+const MIN_CHUNK_SIZE: isize = 1 << MIN_CHUNK_SIZE_LOG2;
+const MIN_CHUNK_ALIGN: isize = max(FOOTER_ALIGN, WORD_ALIGN);
+const WORD_ALIGN: isize = align_of::<usize>();
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -208,7 +196,17 @@ const WORD_ALIGN: usize = align_of::<usize>();
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-const fn max(x: usize, y: usize) -> usize {
+const fn size_of<T>() -> isize {
+  core::mem::size_of::<T>() as isize
+}
+
+#[inline(always)]
+const fn align_of<T>() -> isize {
+  core::mem::align_of::<T>() as isize
+}
+
+#[inline(always)]
+const fn max(x: isize, y: isize) -> isize {
   if x >= y { x } else { y }
 }
 
@@ -248,8 +246,8 @@ impl FromError for Void {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl fmt::Display for AllocError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl core::fmt::Display for AllocError {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.write_str("memory allocation failed")
   }
 }
@@ -268,13 +266,7 @@ impl FromError for AllocError {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-// SAFETY:
-//
-// See safety comment on the `struct Arena` type declaration.
-
-unsafe impl Sync for Arena {}
-
-unsafe fn dealloc_chunk_list(p: ptr) {
+unsafe fn dealloc_chunk_list(p: Ptr) {
   // SAFETY:
   //
   // `p` must be the head of a valid linked list of chunks.
@@ -287,7 +279,7 @@ unsafe fn dealloc_chunk_list(p: ptr) {
   let f = unsafe { p.as_ref::<Footer>() };
   let q = f.next;
   let l = f.layout;
-  let p = p + FOOTER_SIZE - l.size();
+  let p = p + FOOTER_SIZE - l.size() as isize;
 
   unsafe { alloc::alloc::dealloc(p.as_mut_ptr(), l) };
 
@@ -298,7 +290,7 @@ unsafe fn dealloc_chunk_list(p: ptr) {
 
 #[inline(never)]
 #[cold]
-unsafe fn try_alloc_chunk_for<E>(lo: ptr, hi: ptr, object: Layout) -> Result<(ptr, ptr), E>
+unsafe fn try_alloc_chunk_for<E>(_lo: Ptr, hi: Ptr, object: Layout) -> Result<(Ptr, Ptr), E>
 where
   E: FromError
 {
@@ -317,11 +309,9 @@ where
   // unmodified.
 
   const _: () = assert!(MIN_CHUNK_SIZE % MIN_CHUNK_ALIGN == 0);
-  const _: () = assert!(MIN_CHUNK_SIZE <= isize::MAX as usize);
   const _: () = assert!(FOOTER_SIZE <= MIN_CHUNK_SIZE);
   const _: () = assert!(FOOTER_ALIGN <= MIN_CHUNK_ALIGN);
 
-  let _ = hint::black_box(lo);
   let chunks = hi;
 
   let total_allocated =
@@ -331,8 +321,8 @@ where
       unsafe { chunks.as_ref::<Footer>() }.total_allocated
     };
 
-  let object_size = object.size();
-  let object_align = object.align();
+  let object_size = object.size() as isize;
+  let object_align = object.align() as isize;
 
   // The chunk size we'd like to allocate, if the object will fit in it.  It
   // is always a power of two `<= 0b0100...`.
@@ -340,6 +330,8 @@ where
   let size_0 = total_allocated / 4 + 1;
   let size_0 = 1 << (usize::BITS - (size_0 - 1).leading_zeros());
   let size_0 = max(size_0, MIN_CHUNK_SIZE);
+
+  // FIXME: we're using `isize` now, so we need to redo the overflow logic.
 
   // The size of any `Layout` is guaranteed to be `<= isize::MAX`. It follows
   // that `size_1` does not overflow `usize`.
@@ -356,7 +348,7 @@ where
   // Note that a very large `object_size` is necessary for this to occur; the
   // exponential chunk growth alone will not cause this to overflow.
 
-  if size > isize::MAX as usize - (align - 1) {
+  if size > isize::MAX - (align - 1) {
     return Err(E::layout_overflow());
   }
 
@@ -366,13 +358,13 @@ where
   // - `align` is a power of two
   // - `size` rounded up to a multiple of `align` is `<= isize::MAX`
 
-  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+  let layout = unsafe { Layout::from_size_align_unchecked(size as usize, align as usize) };
 
   // SAFETY:
   //
   // - `size != 0`
 
-  let lo = ptr::from(unsafe { alloc::alloc::alloc(layout) });
+  let lo = Ptr::from(unsafe { alloc::alloc::alloc(layout) });
 
   if lo.is_null() {
     return Err(E::global_alloc_error(layout));
@@ -393,7 +385,7 @@ where
   //
   // - `hi` is valid and aligned for writing a `Footer`.
 
-  unsafe { ptr::write(hi, f) };
+  unsafe { hi.write(f) };
 
   Ok((lo, hi))
 }
@@ -411,8 +403,8 @@ impl Arena {
     // underflow `isize` in the capacity calculation.
 
     Self {
-      lo: ptr::invalid(1),
-      hi: ptr::invalid(0),
+      lo: Ptr::invalid(1),
+      hi: Ptr::invalid(0),
     }
   }
 
@@ -434,31 +426,31 @@ impl Arena {
       let f = unsafe { p.as_mut_ref::<Footer>() };
       let q = f.next;
       let l = f.layout;
-      let p = p + FOOTER_SIZE - l.size();
+      let p = p + FOOTER_SIZE - l.size() as isize;
 
       self.lo = p;
 
       if ! q.is_null() {
-        f.next = ptr::NULL;
+        f.next = Ptr::NULL;
         unsafe { dealloc_chunk_list(q) }
       }
     }
   }
 
   #[inline(always)]
-  fn try_alloc<E>(&mut self, layout: Layout) -> Result<ptr, E>
+  fn try_alloc<E>(&mut self, layout: Layout) -> Result<Ptr, E>
   where
     E: FromError
   {
-    let size = layout.size();
-    let align = layout.align();
+    let size = layout.size() as isize;
+    let align = layout.align() as isize;
 
     let p = self.lo;
     let q = self.hi;
 
-    let p = (p + (align - 1)) & ! (align - 1);
+    let p = (p + (align - 1)) & ! (align - 1) as usize;
 
-    if size as isize > (q - p) as isize {
+    if size > q - p {
       let (p, q) = unsafe { try_alloc_chunk_for::<E>(p, q, layout) }?;
       self.lo = p;
       self.hi = q;
@@ -473,7 +465,7 @@ impl Arena {
     Ok(p)
   }
 
-  fn debug(&self, f: &mut fmt::Formatter<'_>, name: &str) -> fmt::Result {
+  fn debug(&self, f: &mut core::fmt::Formatter<'_>, name: &str) -> core::fmt::Result {
     let p = self.lo;
     let q = self.hi;
 
@@ -498,8 +490,8 @@ impl Default for Arena {
   }
 }
 
-impl fmt::Debug for Arena {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl core::fmt::Debug for Arena {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     self.debug(f, "Arena")
   }
 }
@@ -539,12 +531,12 @@ where
   // don't need to consider the case where rounding the size up to the
   // alignment exceeds `isize::MAX`.
 
-  if size_of_element != 0 && len > isize::MAX as usize / size_of_element {
+  if size_of_element != 0 && len > (isize::MAX / size_of_element) as usize {
     return Err(E::layout_overflow());
   }
 
-  let size = size_of_element * len;
-  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+  let size = size_of_element * len as isize;
+  let layout = unsafe { Layout::from_size_align_unchecked(size as usize, align as usize) };
 
   let p = (*arena).try_alloc(layout)?;
 
@@ -586,16 +578,16 @@ where
   let size_of_element = size_of::<T>();
   let align = align_of::<T>();
   let n = src.len();
-  let size = size_of_element * n;
+  let size = size_of_element * n as isize;
 
   // SAFETY:
   //
   // The existence of `src` implies that we'll construct a valid layout.
 
-  let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+  let layout = unsafe { Layout::from_size_align_unchecked(size as usize, align as usize) };
 
   let p = (*arena).try_alloc(layout)?;
-  let q = ptr::from(src);
+  let q = Ptr::from(src);
 
   // SAFETY:
   //
@@ -606,7 +598,7 @@ where
   // Note that the above holds, and in particular that the pointers are
   // non-null and aligned, even if we need to do a zero-byte read and write.
 
-  unsafe { ptr::copy_nonoverlapping::<T>(q, p, n) };
+  unsafe { Ptr::copy_nonoverlapping::<T>(q, p, n) };
 
   // SAFETY:
   //
@@ -703,8 +695,8 @@ fn panic_type_needs_drop() -> ! {
   panic!("cannot initialize arena slot with a type that needs drop")
 }
 
-impl<'a, T> fmt::Debug for Slot<'a, T> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'a, T> core::fmt::Debug for Slot<'a, T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_tuple("Slot").field(&self.0).finish()
   }
 }
@@ -713,7 +705,7 @@ impl<'a, T> Slot<'a, T>
 where
   T: Pointee + ?Sized
 {
-  unsafe fn new(p: ptr, m: T::Metadata) -> Self {
+  unsafe fn new(p: Ptr, m: T::Metadata) -> Self {
     // SAFETY:
     //
     // To satisfy invariants for `Slot`, we require that
@@ -732,7 +724,7 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let p = ptr::from(self.0);
+    let p = Ptr::from(self.0);
 
     // SAFETY:
     //
@@ -762,7 +754,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    let p = ptr::from(self.0);
+    let p = Ptr::from(self.0);
 
     // SAFETY:
     //
@@ -796,7 +788,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       let _: _ = elt.write(f(i));
     }
 
-    let p = ptr::from(p);
+    let p = Ptr::from(p);
 
     // SAFETY:
     //
@@ -819,7 +811,7 @@ impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     let n = self.1;
-    let p = ptr::from(self.0);
+    let p = Ptr::from(self.0);
 
     // SAFETY:
     //
@@ -854,7 +846,7 @@ impl<'a, T> Slot<'a, [T]> {
     }
 
     let n = p.len();
-    let p = ptr::from(p);
+    let p = Ptr::from(p);
 
     // SAFETY:
     //

@@ -18,7 +18,7 @@ unused_qualifications = "warn"
 unused_results = "warn"
 
 [dependencies]
-untyped-pointer = { git = "https://github.com/apribadi/untyped-pointer.git" }
+pop = { git = "https://github.com/apribadi/pop.git" }
 
 [dev-dependencies]
 bumpalo = "3.12.0"
