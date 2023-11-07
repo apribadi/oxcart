@@ -450,7 +450,7 @@ impl Arena {
 
     let p = (p + (align - 1)) & ! (align - 1) as usize;
 
-    if size > q - p {
+    if size > (q - p) as isize {
       let (p, q) = unsafe { try_alloc_chunk_for::<E>(p, q, layout) }?;
       self.lo = p;
       self.hi = q;
