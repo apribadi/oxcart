@@ -1,5 +1,6 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
+#![feature(rust_cold_cc)]
 
 extern crate alloc;
 

@@ -1,8 +1,7 @@
 use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::ptr::NonNull;
-use pop::Ptr;
+use pop::Ptr as ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -10,30 +9,19 @@ use pop::Ptr;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Arena(Header);
+pub struct Arena(Ptr);
 
-pub struct Allocator<'a> {
-  lo: Ptr,
-  hi: Ptr,
-  pd: PhantomData<&'a ()>,
+pub struct Allocator<'a>(
+  p: Ptr,
+  n: isize,
+  w: PhantomData<&'a ()>,
 }
 
 #[repr(transparent)]
-pub struct Slot<T: Initializable + ?Sized>(T::Uninit);
+pub struct Slot<T: Object + ?Sized>(T::Uninit);
 
-#[derive(Debug)]
-pub struct AllocError;
-
-pub trait Initializable {
+pub trait Object {
   type Uninit: ?Sized;
-}
-
-impl<T> Initializable for T {
-  type Uninit = MaybeUninit<T>;
-}
-
-impl<T> Initializable for [T] {
-  type Uninit = [MaybeUninit<T>];
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -43,11 +31,13 @@ impl<T> Initializable for [T] {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[repr(C)]
-struct Header {
-  next: Ptr
-}
+#[derive(Copy, Clone)]
+struct Raw(Ptr, usize);
 
-enum Raised {}
+struct Footer {
+  next: Ptr,
+  size: usize,
+}
 
 trait FromError {
   fn global_alloc_error(_: Layout) -> Self;
@@ -63,18 +53,13 @@ trait FromError {
 const WORD_SIZE: usize = core::mem::size_of::<usize>();
 
 #[cfg(not(test))]
-const MIN_CHUNK_SIZE_LOG2: u32 = 16; // 64kb
+const MIN_CHUNK_SIZE: usize = 1 << 16; // 64kb
 
 #[cfg(test)]
-const MIN_CHUNK_SIZE_LOG2: u32 = 6; // 64b
+const MIN_CHUNK_SIZE: usize = 1 << 6; // 64b
 
-const MIN_CHUNK_SIZE: usize = 1 << MIN_CHUNK_SIZE_LOG2;
-
-const CHUNK_ALIGN: usize = WORD_SIZE;
-
-const _: () = assert!(WORD_SIZE.is_power_of_two());
-const _: () = assert!(core::mem::align_of::<Header>() <= CHUNK_ALIGN);
-const _: () = assert!(core::mem::size_of::<Header>() <= MIN_CHUNK_SIZE);
+const _: () = assert!(core::mem::align_of::<Footer>() == WORD_SIZE);
+const _: () = assert!(core::mem::size_of::<Footer>() <= MIN_CHUNK_SIZE);
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -84,52 +69,16 @@ const _: () = assert!(core::mem::size_of::<Header>() <= MIN_CHUNK_SIZE);
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Raised
+// Object
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl Raised {
-  #[inline(always)]
-  fn unwrap<T>(x: Result<T, Raised>) -> T {
-    match x {
-      Ok(x) => x,
-      Err(e) => match e {}
-    }
-  }
+impl<T> Object for T {
+  type Uninit = MaybeUninit<T>;
 }
 
-impl FromError for Raised {
-  #[inline(never)]
-  #[cold]
-  fn global_alloc_error(layout: Layout) -> Self {
-    alloc::alloc::handle_alloc_error(layout)
-  }
-
-  #[inline(never)]
-  #[cold]
-  fn layout_overflow() -> Self {
-    panic!("layout overflow")
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// AllocError
-//
-////////////////////////////////////////////////////////////////////////////////
-
-impl core::fmt::Display for AllocError {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.write_str("memory allocation failed")
-  }
-}
-
-impl FromError for AllocError {
-  #[inline(always)]
-  fn global_alloc_error(_: Layout) -> Self { Self }
-
-  #[inline(always)]
-  fn layout_overflow() -> Self { Self }
+impl<T> Object for [T] {
+  type Uninit = [MaybeUninit<T>];
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -154,77 +103,69 @@ impl Arena {
   }
 }
 
+/*
 #[inline(never)]
 #[cold]
-unsafe fn try_alloc_chunk_for_layout<E>(x: Ptr, layout: Layout) -> Result<(Ptr, Ptr), E>
+unsafe fn try_alloc_chunk<E>(lo: Ptr, hi: Ptr) -> Result<(Ptr, Ptr), E>
 where
   E: FromError
 {
-  // let s = layout.size();
-  // let a = layout.align();
-  // let h = unsafe { x.gep::<Header>(-1).as_mut_ref() };
-  let _ = x;
-  let _ = layout;
-  panic!()
+  let _ = lo;
+  let _ = hi;
+  Ok((core::hint::black_box(Ptr::NULL), core::hint::black_box(Ptr::NULL)))
 }
+
+*/
 
 #[inline(never)]
 #[cold]
-unsafe fn try_alloc_chunk_for<T, E>(x: Ptr) -> Result<(Ptr, Ptr), E>
+extern "rust-cold" fn try_alloc_chunk<E>(p: Ptr, n: isize) -> Result<(Ptr, isize), E>
 where
   E: FromError
 {
-  unsafe { try_alloc_chunk_for_layout::<E>(x, Layout::new::<T>()) }
+  let _ = p;
+  let _ = n;
+  Ok((core::hint::black_box(Ptr::NULL), core::hint::black_box(0)))
 }
 
 #[inline(always)]
-pub fn try_alloc<'a, T, E>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
+fn try_alloc<'a, T, E>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
 where
   E: FromError
 {
   // PRECONDITIONS:
   //
-  // - s <= isize::MAX
-  // - a is a power of two
-  // - s % a == 0
-  // - lo.addr() <= isize::MAX
-  // - hi.addr() <= isize::MAX
+  // -
 
   let s = core::mem::size_of::<T>();
   let a = core::mem::align_of::<T>();
-  let n = s + WORD_SIZE - 1 & ! (WORD_SIZE - 1);
+  let k = s + WORD_SIZE - 1 & ! (WORD_SIZE - 1);
 
-  let x = allocator.lo;
-  let y = allocator.hi;
+  assert!(a <= WORD_SIZE);
 
-  let y =
-    if a <= WORD_SIZE {
-      y - n
-    } else {
-      y - n & ! (WORD_SIZE - 1)
-    };
+  allocator.p = allocator.p - k;
+  allocator.n = allocator.n.wrapping_sub_unsigned(k);
 
-  if (x.addr() as isize) <= (y.addr() as isize)  {
-    allocator.hi = y;
-    Ok(unsafe { y.as_mut_ref() })
-  } else {
-    let (x, y) = unsafe { try_alloc_chunk_for::<T, E>(x) }?;
-    allocator.lo = x;
-    allocator.hi = y;
-    Ok(unsafe { y.as_mut_ref() })
+  while allocator.n < 0 {
+    let (x, y) = try_alloc_chunk(allocator.p, allocator.n)?;
+    allocator.p = x;
+    allocator.n = y;
+    allocator.p = allocator.p - k;
+    allocator.n = allocator.n.wrapping_sub_unsigned(k);
   }
+
+  Ok(unsafe { allocator.p.as_mut_ref() })
 }
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
-    Raised::unwrap(try_alloc::<T, Raised>(self))
+    Panicked::unwrap(try_alloc::<T, Panicked>(self))
   }
 
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<&'a mut Slot<T>, AllocError> {
-    let _ = self;
-    unimplemented!()
+    try_alloc::<T, AllocError>(self)
   }
 
   #[inline(always)]
@@ -373,4 +314,15 @@ impl<T> Slot<[T]> {
 
 pub fn foo<'a>(allocator: &mut Allocator<'a>) -> &'a mut (u64, u64) {
   allocator.alloc::<(u64, u64)>().init((0, 0))
+}
+
+pub fn bar<'a>(allocator: Allocator<'a>) -> &'a mut (u64, u64) {
+  let mut allocator = allocator;
+  allocator.alloc::<(u64, u64)>().init((0, 0))
+}
+
+pub fn baz<'a, 'b>(allocator: &mut Allocator<'a>, slice: &'b mut [Option<&'a u64>]) {
+  for elt in slice.iter_mut() {
+    *elt = Some(allocator.alloc().init(13))
+  }
 }
