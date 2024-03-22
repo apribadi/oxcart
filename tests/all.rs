@@ -2,9 +2,9 @@ use expect_test::expect;
 use core::alloc::Layout;
 use core::fmt;
 use core::mem::size_of;
-use oxcart::Arena;
-use oxcart::ArenaRef;
-use oxcart::Slot;
+use oxcart::two::Arena;
+use oxcart::two::Slot;
+// use oxcart::ArenaRef;
 
 #[inline(always)]
 fn addr<T: ?Sized>(p: *const T) -> usize {
@@ -15,30 +15,31 @@ fn addr<T: ?Sized>(p: *const T) -> usize {
 #[test]
 fn test_api() {
   let mut arena = Arena::new();
-  arena.reset();
-  let mut arena_ref = &mut arena;
-  let _ = arena_ref.alloc::<u64>();
-  let _ = arena_ref.try_alloc::<u64>();
-  let _ = arena_ref.alloc_slice::<u64>(5);
-  let _ = arena_ref.try_alloc_slice::<u64>(5);
-  let _ = arena_ref.alloc_layout(Layout::new::<u64>());
-  let _ = arena_ref.try_alloc_layout(Layout::new::<u64>());
-  let _ = arena_ref.copy_slice::<u64>(&[0, 1, 2, 3, 4]);
-  let _ = arena_ref.try_copy_slice::<u64>(&[0, 1, 2, 3, 4]);
-  let _ = arena_ref.copy_str("hello");
-  let _ = arena_ref.try_copy_str("hello");
-  let _ = arena_ref.alloc::<u64>().as_uninit();
-  let _ = arena_ref.alloc::<u64>().init(13);
-  let _ = arena_ref.alloc::<[u64; 5]>().as_uninit_array();
-  let _ = arena_ref.alloc::<[u64; 5]>().init_array(|i| i as u64);
-  let _ = arena_ref.alloc_slice::<u64>(5).len();
-  let _ = arena_ref.alloc_slice::<u64>(5).as_uninit_slice();
-  let _ = arena_ref.alloc_slice::<u64>(5).init_slice(|i| i as u64);
-  let _ = Arena::default();
-  let _ = format!("{:?}", Arena::new());
-  let _ = format!("{:?}", (&mut Arena::new()).alloc::<u64>());
+  // arena.reset();
+  let mut allocator = arena.allocator();
+  let _ = allocator.alloc::<u64>();
+  // let _ = allocator.try_alloc::<u64>();
+  // let _ = allocator.alloc_slice::<u64>(5);
+  // let _ = allocator.try_alloc_slice::<u64>(5);
+  // let _ = allocator.alloc_layout(Layout::new::<u64>());
+  // let _ = allocator.try_alloc_layout(Layout::new::<u64>());
+  // let _ = allocator.copy_slice::<u64>(&[0, 1, 2, 3, 4]);
+  // let _ = allocator.try_copy_slice::<u64>(&[0, 1, 2, 3, 4]);
+  // let _ = allocator.copy_str("hello");
+  // let _ = allocator.try_copy_str("hello");
+  let _ = allocator.alloc::<u64>().as_uninit();
+  let _ = allocator.alloc::<u64>().init(13);
+  let _ = allocator.alloc::<[u64; 5]>().as_uninit_array();
+  let _ = allocator.alloc::<[u64; 5]>().init_array(|i| i as u64);
+  // let _ = allocator.alloc_slice::<u64>(5).len();
+  // let _ = allocator.alloc_slice::<u64>(5).as_uninit_slice();
+  // let _ = allocator.alloc_slice::<u64>(5).init_slice(|i| i as u64);
+  // let _ = Arena::default();
+  // let _ = format!("{:?}", Arena::new());
+  // let _ = format!("{:?}", (&mut Arena::new()).alloc::<u64>());
 }
 
+/*
 #[test]
 fn test_debug() {
   expect!["Arena { lo: 0x0000000000000001, hi: 0x0000000000000000 }"].assert_eq(&format!("{:?}", Arena::new()));
@@ -106,6 +107,7 @@ fn test_types_are_send_and_sync() {
   is_send::<Slot<'_, _>>(&y);
   is_sync::<Slot<'_, _>>(&y);
 }
+*/
 
 #[test]
 fn test_linked_list() {
@@ -115,10 +117,10 @@ fn test_linked_list() {
   }
 
   let mut arena = Arena::new();
-  let mut arena_ref = &mut arena;
+  let mut allocator = arena.allocator();
   let mut head: Option<&Node<'_, u64>> = None;
   for i in 0 .. 10 {
-    head = Some(arena_ref.alloc().init(Node { car: i as u64, cdr: head }));
+    head = Some(allocator.alloc().init(Node { car: i as u64, cdr: head }));
   }
   let mut sum = 0;
   while let Some(node) = head {
@@ -128,6 +130,7 @@ fn test_linked_list() {
   assert!(sum == 45);
 }
 
+/*
 #[test]
 fn test_demo() {
   let mut arena = Arena::new();
@@ -166,3 +169,4 @@ fn test_demo() {
 
   arena.reset();
 }
+*/

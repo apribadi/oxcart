@@ -1,7 +1,7 @@
 # oxcart
 
-A fast arena allocator - supports efficiently allocating a large number of
-objects and then deallocating all of them at once.
+A fast arena allocator - use to efficiently allocate a large number of
+objects and then deallocate all of them at once.
 
 ## Example
 
