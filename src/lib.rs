@@ -32,10 +32,12 @@ const IS_TEST: bool = false;
 #[cfg(test)]
 const IS_TEST: bool = true;
 
-const SLAB_LOG2: usize = if IS_TEST { 3 } else { 12 - WORD_LOG2 };
 const SLAB: usize = 1 << SLAB_LOG2;
+const SLAB_LOG2: usize = if IS_TEST { 3 } else { 12 - WORD_LOG2 };
+
 const WORD_LOG2: usize = size_of::<usize>().ilog2() as usize;
-const WORD: usize = 1 << WORD_LOG2;
+const WORD_MASK: usize = WORD_SIZE.wrapping_neg();
+const WORD_SIZE: usize = 1 << WORD_LOG2;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -71,10 +73,10 @@ struct Root {
   is_growing: bool,
 }
 
-const _: () = assert!(align_of::<Span>() <= WORD);
-const _: () = assert!(align_of::<Link>() <= WORD);
-const _: () = assert!(align_of::<Root>() <= WORD);
-const _: () = assert!(size_of::<Root>() <= WORD * SLAB);
+const _: () = assert!(align_of::<Span>() <= WORD_SIZE);
+const _: () = assert!(align_of::<Link>() <= WORD_SIZE);
+const _: () = assert!(align_of::<Root>() <= WORD_SIZE);
+const _: () = assert!(size_of::<Root>() <= WORD_SIZE * SLAB);
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -104,20 +106,18 @@ unsafe impl<T> Object for [T] {
 
 impl Span {
   #[inline(always)]
+  fn new(ptr: ptr, len: usize) -> Self {
+    Self { ptr, len, }
+  }
+
+  #[inline(always)]
   fn tail(self) -> ptr {
-    self.ptr + WORD * self.len
+    self.ptr + self.len
   }
 
   #[inline(always)]
   fn chop(self, n: usize) -> Self {
-    let ptr = self.ptr + WORD * n;
-    let len = self.len - n;
-    Self { ptr, len }
-  }
-
-  #[inline(always)]
-  fn is_null(self) -> bool {
-    self.ptr.is_null()
+    Self { ptr: self.ptr + n, len: self.len - n, }
   }
 }
 
@@ -127,35 +127,59 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+#[inline(always)]
+unsafe fn alloc_layout_fast(s: Span, l: Layout) -> (Span, Span) {
+  let m = l.align();
+  let n = l.size();
+  let x = WORD_MASK & m - 1 & ptr
+  let x = ptr::addr(s.ptr).wrapping_neg() & m - 1 & WORD_MASK;
+  let y = WORD_SIZE - 1 + n & WORD_MASK;
+  let z = x + y;
+  if z > s.len { return unsafe { alloc_layout_slow(s, l) }; };
+  let o = s.ptr + x;
+  let s = s.chop(z);
+  (s, o)
+}
+
+#[inline(never)]
+#[cold]
+unsafe fn alloc_layout_slow(allocator_state: Span, layout: Layout) -> (Span, ptr) {
+  let _ = allocator_state;
+  let _ = layout;
+  std::hint::black_box((Span { ptr: ptr::NULL, len: 0 }, ptr::NULL))
+}
+
 #[inline(never)]
 #[cold]
 unsafe fn reserve(x: Span, n: usize) -> Span {
-  let l = x.tail();
-  let l = l.as_ref::<Link>();
+  let l = ptr::as_ref::<Link>(x.tail());
   let r = l.root;
 
-  if ! r.is_null() && ! r.as_ref::<Root>().is_growing {
+  if ! ptr::is_null(r) && ! ptr::as_ref::<Root>(r).is_growing {
     return l.next;
   }
 
-  let r = if ! r.is_null() { r } else { ptr::from(l) };
-  let r = r.as_mut_ref::<Root>();
+  let r =
+    if ! ptr::is_null(r) {
+      ptr::as_mut_ref::<Root>(r)
+    } else {
+      ptr::as_mut_ref::<Root>(l)
+    };
 
-  let c = std::alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD));
-  let c = ptr::from(c);
+  let c = std::alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD_SIZE));
 
-  if c.is_null() {
+  if ptr::is_null(c) {
     panic!("std::alloc::alloc failed!")
   }
 
   let _ = n;
   let n = SLAB;
-  let c = Span { ptr: c, len: n - size_of::<Link>() >> WORD_LOG2 };
+  let c = Span { ptr: ptr::from_mut_ptr(c), len: n - size_of::<Link>() >> WORD_LOG2 };
   let l = c.tail();
   let b = r.link.next;
-  l.write::<Link>(Link { next: b, root: ptr::from_ref(r) });
+  ptr::write::<Link>(l, Link { next: b, root: ptr::from_ref(r) });
   r.link.next = c;
-  s
+  b
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -170,7 +194,7 @@ impl Arena {
   }
 
   pub fn allocator(&mut self) -> Allocator<'_> {
-    let x = unsafe { self.root.as_mut_ref::<Root>() };
+    let x = unsafe { ptr::as_mut_ref::<Root>(self.root) };
     x.is_growing = false;
     Allocator(x.link.next, PhantomData)
   }
@@ -196,7 +220,19 @@ fn panic_layout_overflow() -> ! {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
+  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut Slot<[u8]> {
+    let s = self.0;
+    let (s, o) = unsafe { alloc_layout_fast(s, layout) };
+    self.0 = s;
+    let o = ptr::as_slice_mut_ptr::<u8>(o, layout.size());
+    unsafe { &mut *std::mem::transmute::<*mut [u8], *mut Slot<[u8]>>(o) }
+  }
+
+  #[inline(always)]
   pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
+    let o = self.alloc_layout(Layout::new::<T>());
+    unsafe { ptr::as_mut_ref(o) }
+    /*
     if align_of::<T>() <= WORD {
       let n = WORD - 1 + size_of::<T>() >> WORD_LOG2;
       let x = self.0;
@@ -204,26 +240,27 @@ impl<'a> Allocator<'a> {
       let y = x.ptr;
       let x = x.chop(n);
       self.0 = x;
-      unsafe { y.as_mut_ref() }
+      unsafe { ptr::as_mut_ref(y) }
     } else {
       unimplemented!()
     }
+    */
   }
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> &'a mut Slot<[T]> {
-    if align_of::<T>() <= WORD {
+    if align_of::<T>() <= WORD_SIZE {
       if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
         panic_layout_overflow()
       }
 
-      let n = WORD - 1 + size_of::<T>() * len >> WORD_LOG2;
+      let n = WORD_SIZE - 1 + size_of::<T>() * len >> WORD_LOG2;
       let x = self.0;
       let x = if n <= x.len { x } else { unsafe { reserve(x, n) } };
       let y = x.ptr;
       let x = x.chop(n);
       self.0 = x;
-      let y = y.as_slice_mut_ptr::<T>(len);
+      let y = ptr::as_slice_mut_ptr::<T>(y, len);
       unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(y) }
     } else {
       if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
@@ -234,34 +271,23 @@ impl<'a> Allocator<'a> {
     }
   }
 
-  #[inline(always)]
-  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut Slot<[u8]> {
-    assert!(false);
-    let x = self.0;
-    let b = layout.size();
-    let y: ptr = ptr::NULL;
-    let y = y.as_slice_mut_ptr::<u8>(b);
-    self.0 = x;
-    unsafe { &mut *std::mem::transmute::<*mut [u8], *mut Slot<[u8]>>(y) }
-  }
-
   pub fn copy_slice<T>(&mut self, src: &[T]) -> &'a mut [T]
   where
     T: Copy
   {
-    assert!(align_of::<T>() <= WORD);
+    assert!(align_of::<T>() <= WORD_SIZE);
 
     // NB: Unlike `alloc_slice`, this can assume that the size calculations
     // don't overflow, because `src` exists.
 
-    let n = WORD - 1 + size_of::<T>() * src.len() >> WORD_LOG2;
+    let n = WORD_SIZE - 1 + size_of::<T>() * src.len() >> WORD_LOG2;
     let x = self.0;
     let x = if n <= x.len { x } else { unsafe { reserve(x, n) } };
     let y = x.ptr;
     let x = x.chop(n);
     self.0 = x;
-    unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), y, src.len()) };
-    unsafe { y.as_slice_mut_ref(src.len()) }
+    unsafe { ptr::copy_nonoverlapping::<T>(src, y, src.len()) };
+    unsafe { ptr::as_slice_mut_ref::<T>(y, src.len()) }
   }
 
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
@@ -296,7 +322,7 @@ impl<T, const N: usize> Slot<[T; N]> {
     // The layouts of `MaybeUninit<[T; N]>` and `[MaybeUninit<T>; N]` are
     // guaranteed to be the same.
 
-    unsafe { ptr::from(&mut self.0).as_mut_ref() }
+    unsafe { ptr::as_mut_ref(&mut self.0) }
   }
 
   #[inline(always)]
@@ -316,7 +342,7 @@ impl<T, const N: usize> Slot<[T; N]> {
     //
     // Every array element has been initialized.
 
-    unsafe { ptr::from(x).as_mut_ref() }
+    unsafe { ptr::as_mut_ref(x) }
   }
 }
 
@@ -345,18 +371,32 @@ impl<T> Slot<[T]> {
     //
     // Every slice element has been initialized.
 
-    unsafe { ptr::from(x).as_slice_mut_ref(n) }
+    unsafe { ptr::as_slice_mut_ref(x, n) }
   }
 }
 
 pub fn foo<'a>(a: Allocator<'a>, n: usize) {
   let mut a = a;
+  let mut x = 1_u64;
 
   for i in 0 .. n {
-    let _: _ =  a.alloc().init(i as u64);
+    let _: _ =  a.alloc().init(x);
+    x = x ^ x << 7;
+    x = x ^ x >> 9;
   }
 }
 
 pub fn bar<'a>(a: &mut Allocator<'a>, x: u64, y: u64) -> &'a mut (u64, u64) {
   a.alloc().init((x, y))
+}
+
+pub fn baz<'a>(a: &mut Allocator<'a>, x: u128) -> &'a mut u128 {
+  a.alloc().init(x)
+}
+
+#[repr(align(32))]
+pub struct A(u64);
+
+pub fn qux<'a>(a: &mut Allocator<'a>, x: A) -> &'a mut A {
+  a.alloc().init(x)
 }
