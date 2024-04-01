@@ -80,7 +80,7 @@ impl ptr {
   /// arithmetic.
 
   #[inline(always)]
-  pub fn offset(self, n: isize) -> ptr {
+  pub const fn offset(self, n: isize) -> ptr {
     ptr(self.0.wrapping_offset(n))
   }
 
@@ -88,7 +88,7 @@ impl ptr {
   /// arithmetic.
 
   #[inline(always)]
-  pub fn add(self, n: usize) -> ptr {
+  pub const fn add(self, n: usize) -> ptr {
     ptr(self.0.wrapping_add(n))
   }
 
@@ -96,7 +96,7 @@ impl ptr {
   /// arithmetic.
 
   #[inline(always)]
-  pub fn sub(self, n: usize) -> ptr {
+  pub const fn sub(self, n: usize) -> ptr {
     ptr(self.0.wrapping_sub(n))
   }
 
@@ -115,11 +115,11 @@ impl ptr {
 
   #[inline(always)]
   pub fn align_offset(self, align: usize) -> usize {
-    self.addr() & align.wrapping_neg()
+    self.addr().wrapping_neg() & align - 1
   }
 
   #[inline(always)]
-  pub fn gep<T>(self, index: isize) -> ptr {
+  pub const fn gep<T>(self, index: isize) -> ptr {
     self.offset((core::mem::size_of::<T>() as isize).wrapping_mul(index))
   }
 
@@ -226,27 +226,27 @@ impl ptr {
   }
 
   #[inline(always)]
-  pub fn as_const_ptr<T>(self) -> *const T {
+  pub const fn as_const_ptr<T>(self) -> *const T {
     self.0 as *const T
   }
 
   #[inline(always)]
-  pub fn as_mut_ptr<T>(self) -> *mut T {
+  pub const fn as_mut_ptr<T>(self) -> *mut T {
     self.0 as *mut T
   }
 
   #[inline(always)]
-  pub fn as_slice_const_ptr<T>(self, len: usize) -> *const [T] {
+  pub const fn as_slice_const_ptr<T>(self, len: usize) -> *const [T] {
     core::ptr::slice_from_raw_parts(self.as_const_ptr(), len)
   }
 
   #[inline(always)]
-  pub fn as_slice_mut_ptr<T>(self, len: usize) -> *mut [T] {
-    core::ptr::slice_from_raw_parts_mut(self.as_mut_ptr(), len)
+  pub const fn as_slice_mut_ptr<T>(self, len: usize) -> *mut [T] {
+    self.as_slice_const_ptr::<T>(len) as *mut [T]
   }
 
   #[inline(always)]
-  pub unsafe fn as_ref<'a, T>(self) -> &'a T {
+  pub const unsafe fn as_ref<'a, T>(self) -> &'a T {
     let x = self.as_const_ptr();
     unsafe { &*x }
   }
@@ -258,7 +258,7 @@ impl ptr {
   }
 
   #[inline(always)]
-  pub unsafe fn as_slice_ref<'a, T>(self, len: usize) -> &'a [T] {
+  pub const unsafe fn as_slice_ref<'a, T>(self, len: usize) -> &'a [T] {
     let x = self.as_slice_const_ptr(len);
     unsafe { &*x }
   }
@@ -274,13 +274,9 @@ impl ptr {
   /// The pointer must not have address zero.
 
   #[inline(always)]
-  pub unsafe fn as_non_null<T>(self) -> core::ptr::NonNull<T> {
+  pub const unsafe fn as_non_null<T>(self) -> core::ptr::NonNull<T> {
     unsafe { core::ptr::NonNull::new_unchecked(self.as_mut_ptr()) }
   }
-}
-
-pub trait ThinRef {
-  unsafe fn cast(x: ptr) -> Self;
 }
 
 impl<T: ?Sized> From<*const T> for ptr {
@@ -416,6 +412,6 @@ impl core::ops::Neg for ptr {
 
 impl core::fmt::Debug for ptr {
   fn fmt(&self, out: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    write!(out, "0x{:01$x}", self.addr(), (usize::BITS / 4) as usize)
+    write!(out, "0x{:01$x}", self.addr(), usize::BITS as usize / 4)
   }
 }
