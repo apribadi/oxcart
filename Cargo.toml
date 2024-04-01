@@ -10,6 +10,7 @@ version = "0.3.0"
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 non_ascii_idents = "warn"
+non_camel_case_types = "allow"
 trivial_numeric_casts = "warn"
 unreachable_pub = "warn"
 unused_lifetimes = "warn"
@@ -17,7 +18,7 @@ unused_qualifications = "warn"
 unused_results = "warn"
 
 [dependencies]
-pop = { git = "https://github.com/apribadi/pop.git" }
+# pop = { git = "https://github.com/apribadi/pop.git" }
 
 [dev-dependencies]
 bumpalo = "3.12.0"
