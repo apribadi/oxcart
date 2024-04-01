@@ -1,6 +1,7 @@
 pub mod pop;
 
 use std::alloc::Layout;
+use std::cell::Cell;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -17,7 +18,7 @@ use pop::ptr;
 
 pub struct Arena { root: ptr }
 
-pub struct Allocator<'a>(Span, PhantomData<&'a mut ()>);
+pub struct Allocator<'a>(Cell<Span>, PhantomData<&'a mut ()>);
 
 #[repr(transparent)]
 pub struct Slot<T>(T::Uninit)
@@ -26,6 +27,7 @@ where
 
 pub trait Object { type Uninit: ?Sized; }
 
+#[derive(Clone, Copy, Debug)]
 pub struct AllocError;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -177,7 +179,7 @@ impl Arena {
   pub fn allocator(&mut self) -> Allocator<'_> {
     let r = unsafe { self.root.as_mut_ref::<Root>() };
     r.is_growing = false;
-    Allocator(r.link.next, PhantomData)
+    Allocator(Cell::new(r.link.next), PhantomData)
   }
 }
 
@@ -194,7 +196,10 @@ impl Drop for Arena {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>) {
+unsafe fn alloc_fast<E>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>)
+where
+  E: Fail
+{
   let p = x.ptr;
   let n = x.len;
   let a = y.align();
@@ -216,7 +221,10 @@ unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, 
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>) {
+unsafe fn alloc_slow<E>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>)
+where
+  E: Fail
+{
   // TODO
   let _ = x;
   let _ = y;
@@ -228,35 +236,42 @@ unsafe fn alloc_slow<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, 
 }
 
 #[inline(always)]
-fn alloc_impl<'a, E: Fail>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<NonNull<u8>, E> {
-  let (x, y) = unsafe { alloc_fast(allocator.0, layout) };
-  allocator.0 = x;
-  y
+fn alloc_layout<'a, E>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
+where
+  E: Fail
+{
+  let s = allocator.0.get_mut();
+  let (x, y) = unsafe { alloc_fast(*s, layout) };
+  *s = x;
+  let y = y?;
+  let y = ptr::from(y);
+  let y = unsafe { y.as_slice_mut_ref::<MaybeUninit<u8>>(layout.size()) };
+  Ok(y)
 }
 
 #[inline(always)]
-fn alloc<'a, T, E: Fail>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E> {
-  let x = ptr::from(alloc_impl(allocator, Layout::new::<T>())?);
+fn alloc<'a, T, E>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
+where
+  E: Fail
+{
+  let x = alloc_layout(allocator, Layout::new::<T>())?;
+  let x = ptr::from(x);
   let x = unsafe { x.as_mut_ref() };
   Ok(x)
 }
 
 #[inline(always)]
-fn alloc_layout<'a, E: Fail>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<&'a mut Slot<[u8]>, E> {
-  let x = ptr::from(alloc_impl(allocator, layout)?);
-  let x = x.as_slice_mut_ptr::<u8>(layout.size());
-  let x = unsafe { &mut *std::mem::transmute::<*mut [u8], *mut Slot<[u8]>>(x) };
-  Ok(x)
-}
-
-#[inline(always)]
-fn alloc_slice<'a, T, E: Fail>(allocator: &mut Allocator<'a>, len: usize) -> Result<&'a mut Slot<[T]>, E> {
+fn alloc_slice<'a, T, E>(allocator: &mut Allocator<'a>, len: usize) -> Result<&'a mut Slot<[T]>, E>
+where
+  E: Fail
+{
   if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
     return E::fail(Error::LayoutOverflow);
   }
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = ptr::from(alloc_impl(allocator, l)?);
+  let x = alloc_layout(allocator, l)?;
+  let x = ptr::from(x);
   let x = x.as_slice_mut_ptr::<T>(len);
   let x = unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(x) };
   Ok(x)
@@ -268,7 +283,8 @@ where
   T: Copy,
   E: Fail
 {
-  let x = ptr::from(alloc_impl(allocator, Layout::for_value(src))?);
+  let x = alloc_layout(allocator, Layout::for_value(src))?;
+  let x = ptr::from(x);
   unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, src.len()) };
   let x = unsafe { x.as_slice_mut_ref::<T>(src.len()) };
   Ok(x)
@@ -321,6 +337,16 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
+  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
+    unwrap(alloc_layout(self, layout))
+  }
+
+  #[inline(always)]
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
+    alloc_layout(self, layout)
+  }
+
+  #[inline(always)]
   pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
     unwrap(alloc(self))
   }
@@ -328,16 +354,6 @@ impl<'a> Allocator<'a> {
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<&'a mut Slot<T>, AllocError> {
     alloc(self)
-  }
-
-  #[inline(always)]
-  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut Slot<[u8]> {
-    unwrap(alloc_layout(self, layout))
-  }
-
-  #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut Slot<[u8]>, AllocError> {
-    alloc_layout(self, layout)
   }
 
   #[inline(always)]
@@ -450,8 +466,8 @@ impl<T> Slot<[T]> {
   }
 }
 
-pub fn foo<'a>(a: Allocator<'a>, n: usize) {
-  let mut a = a;
+pub fn foo<'a>(a: &mut Allocator<'a>, n: usize) {
+  // let mut a = a;
   let mut x = 1_u64;
 
   for _ in 0 .. n {
@@ -493,4 +509,3 @@ pub fn aaa4<'a>(a: &mut Allocator<'a>, n: usize) -> &'a mut [u64] {
 pub fn aaa5<'a>(a: &mut Allocator<'a>, x: u64) -> Result<&'a mut u64, AllocError> {
   a.try_alloc().map(|s| s.init(x))
 }
-
