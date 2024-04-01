@@ -6,6 +6,7 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
 use std::mem::size_of;
+use std::ptr::NonNull;
 use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -25,6 +26,8 @@ where
 
 pub trait Object { type Uninit: ?Sized; }
 
+pub struct AllocError;
+
 ////////////////////////////////////////////////////////////////////////////////
 //
 // CONSTANTS
@@ -42,7 +45,8 @@ const WORD_LOG2: usize = size_of::<usize>().ilog2() as usize;
 const SLAB_SIZE: usize = 1 << SLAB_LOG2;
 const SLAB_LOG2: usize = if IS_TEST { 3 } else { 12 - WORD_LOG2 };
 */
-const W: usize = size_of::<usize>();
+const NULL: ptr = ptr::NULL;
+const WORD: usize = size_of::<usize>();
 
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -79,9 +83,33 @@ struct Root {
   is_growing: bool,
 }
 
-const _: () = assert!(align_of::<Span>() <= W);
-const _: () = assert!(align_of::<Link>() <= W);
-const _: () = assert!(align_of::<Root>() <= W);
+const _: () = assert!(align_of::<Span>() <= WORD);
+const _: () = assert!(align_of::<Link>() <= WORD);
+const _: () = assert!(align_of::<Root>() <= WORD);
+
+enum Panicked { }
+
+enum Error {
+  GlobalAllocatorFailed,
+  LayoutOverflow,
+}
+
+trait Fail: Sized {
+  fn fail<T>(_: Error) -> Result<T, Self>;
+}
+
+impl Fail for Panicked {
+  fn fail<T>(e: Error) -> Result<T, Self> {
+    fail(e)
+  }
+}
+
+impl Fail for AllocError {
+  #[inline(always)]
+  fn fail<T>(_: Error) -> Result<T, Self> {
+    Err(AllocError)
+  }
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -92,6 +120,15 @@ const _: () = assert!(align_of::<Root>() <= W);
 #[inline(always)]
 unsafe fn assume(x: bool) {
   if ! x { unsafe { unreachable_unchecked() }; }
+}
+
+#[inline(never)]
+#[cold]
+fn fail(x: Error) -> ! {
+  match x {
+    Error::GlobalAllocatorFailed => panic!("global allocator failed!"),
+    Error::LayoutOverflow => panic!("layout overflow!"),
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -123,35 +160,78 @@ impl Span {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// core operations
+// Arena
+//
+////////////////////////////////////////////////////////////////////////////////
+
+impl Arena {
+  pub fn new() -> Self {
+    // TODO
+    Self { root: NULL }
+  }
+
+  pub fn allocator(&mut self) -> Allocator<'_> {
+    let r = unsafe { self.root.as_mut_ref::<Root>() };
+    r.is_growing = false;
+    Allocator(r.link.next, PhantomData)
+  }
+}
+
+impl Drop for Arena {
+  fn drop(&mut self) {
+    let _ = self;
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Allocator
 //
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-unsafe fn alloc_fast(x: Span, y: Layout) -> (Span, ptr) {
+unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> Result<(Span, NonNull<u8>), E> {
   let p = x.ptr;
   let n = x.len;
   let a = y.align();
   let s = y.size();
 
-  unsafe { assume(p.addr() & W - 1 == 0) };
+  unsafe { assume(p.addr() & WORD - 1 == 0) };
 
-  let i = - p & a - 1;           // <= 0b0111...1
-  let j = W - 1 + s & ! (W - 1); // <= 0b1000...0
+  let i = - p & a - 1;                 // <= 0b0111...1
+  let j = WORD - 1 + s & ! (WORD - 1); // <= 0b1000...0
   let k = i + j;
 
-  if k <= n { return (Span::new(p + k, n - k), p + i); }
+  if k <= n { return Ok((Span::new(p + k, n - k), unsafe { (p + i).as_non_null() })); }
 
-  return unsafe { alloc_slow(x, y) };
+  return unsafe { alloc_slow::<E>(x, y) };
 }
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow(x: Span, y: Layout) -> (Span, ptr) {
+unsafe fn alloc_slow<E: Fail>(x: Span, y: Layout) -> Result<(Span, NonNull<u8>), E> {
   // TODO
   let _ = x;
   let _ = y;
-  std::hint::black_box((Span::new(ptr::NULL, 0), ptr::NULL))
+  if std::hint::black_box(true) {
+    E::fail(Error::GlobalAllocatorFailed)
+  } else {
+    Ok((Span::new(NULL, 0), NonNull::dangling()))
+  }
+}
+
+#[inline(always)]
+fn alloc_impl<'a, E: Fail>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<NonNull<u8>, E> {
+  let (x, y) = unsafe { alloc_fast(allocator.0, layout) }?;
+  allocator.0 = x;
+  Ok(y)
+}
+
+#[inline(always)]
+fn alloc<'a, T, E: Fail>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E> {
+  let x = alloc_impl(allocator, Layout::new::<T>())?;
+  let x = unsafe { ptr::from(x).as_mut_ref() };
+  Ok(x)
 }
 
 /*
@@ -189,48 +269,29 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
 }
 */
 
-////////////////////////////////////////////////////////////////////////////////
-//
-// Arena
-//
-////////////////////////////////////////////////////////////////////////////////
-
-impl Arena {
-  pub fn new() -> Self {
-    Self { root: ptr::NULL }
-  }
-
-  pub fn allocator(&mut self) -> Allocator<'_> {
-    let r = unsafe { self.root.as_mut_ref::<Root>() };
-    r.is_growing = false;
-    Allocator(r.link.next, PhantomData)
-  }
-}
-
-impl Drop for Arena {
-  fn drop(&mut self) {
-    let _ = self;
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// Allocator
-//
-////////////////////////////////////////////////////////////////////////////////
-
 impl<'a> Allocator<'a> {
   #[inline(always)]
   fn alloc_internal(&mut self, layout: Layout) -> ptr {
-    let (x, y) = unsafe { alloc_fast(self.0, layout) };
+    match unsafe { alloc_fast::<Panicked>(self.0, layout) } {
+      Err(e) => { match e { } }
+      Ok((x, y)) => {
+        self.0 = x;
+        ptr::from(y)
+      }
+    }
+    /*
+    let (x, y) = unsafe { alloc_fast::<UnwindMode>(self.0, layout) };
     self.0 = x;
-    y
+    ptr::from(y)
+    */
   }
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
-    let x = self.alloc_internal(Layout::new::<T>());
-    unsafe { x.as_mut_ref() }
+    match alloc::<T, Panicked>(self) {
+      Err(e) => { match e { } }
+      Ok(x) => x
+    }
   }
 
   #[inline(always)]
@@ -243,7 +304,7 @@ impl<'a> Allocator<'a> {
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> &'a mut Slot<[T]> {
     if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
-      panic!("layout overflow!")
+      fail(Error::LayoutOverflow)
     }
 
     let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
@@ -354,17 +415,31 @@ pub fn foo<'a>(a: Allocator<'a>, n: usize) {
   }
 }
 
-pub fn aaa0<'a>(a: &mut Allocator<'a>, x: u64, y: u64) -> &'a mut (u64, u64) {
-  a.alloc().init((x, y))
+pub fn aaa0<'a>(a: &mut Allocator<'a>, x: u32) -> &'a mut u32 {
+  a.alloc().init(x)
 }
 
-pub fn aaa1<'a>(a: &mut Allocator<'a>, x: u128) -> &'a mut u128 {
+pub fn aaa1<'a>(a: &mut Allocator<'a>, x: u64) -> &'a mut u64 {
+  a.alloc().init(x)
+}
+
+pub fn aaa2<'a>(a: &mut Allocator<'a>, x: u128) -> &'a mut u128 {
   a.alloc().init(x)
 }
 
 #[repr(align(32))]
-pub struct A(pub u64);
+pub struct A(pub [u8; 65]);
 
-pub fn aaa2<'a>(a: &mut Allocator<'a>, x: A) -> &'a mut A {
+pub fn aaa3<'a>(a: &mut Allocator<'a>, x: A) -> &'a mut A {
   a.alloc().init(x)
+}
+
+pub fn aaa4<'a>(a: &mut Allocator<'a>, n: usize) -> &'a mut [u64] {
+  let mut x = 1_u64;
+  a.alloc_slice(n).init_slice(|_| {
+    let y = x;
+    x = x ^ x << 7;
+    x = x ^ x >> 9;
+    y
+  })
 }
