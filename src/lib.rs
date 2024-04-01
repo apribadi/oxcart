@@ -99,8 +99,13 @@ trait Fail: Sized {
 }
 
 impl Fail for Panicked {
-  fn fail<T>(e: Error) -> Result<T, Self> {
-    fail(e)
+  #[inline(never)]
+  #[cold]
+  fn fail<T>(x: Error) -> Result<T, Self> {
+    match x {
+      Error::GlobalAllocatorFailed => panic!("global allocator failed!"),
+      Error::LayoutOverflow => panic!("layout overflow!"),
+    }
   }
 }
 
@@ -122,12 +127,11 @@ unsafe fn assume(x: bool) {
   if ! x { unsafe { unreachable_unchecked() }; }
 }
 
-#[inline(never)]
-#[cold]
-fn fail(x: Error) -> ! {
+#[inline(always)]
+fn unwrap<T>(x: Result<T, Panicked>) -> T {
   match x {
-    Error::GlobalAllocatorFailed => panic!("global allocator failed!"),
-    Error::LayoutOverflow => panic!("layout overflow!"),
+    Ok(x) => x,
+    Err(e) => match e { }
   }
 }
 
@@ -190,7 +194,7 @@ impl Drop for Arena {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> Result<(Span, NonNull<u8>), E> {
+unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>) {
   let p = x.ptr;
   let n = x.len;
   let a = y.align();
@@ -202,35 +206,81 @@ unsafe fn alloc_fast<E: Fail>(x: Span, y: Layout) -> Result<(Span, NonNull<u8>),
   let j = WORD - 1 + s & ! (WORD - 1); // <= 0b1000...0
   let k = i + j;
 
-  if k <= n { return Ok((Span::new(p + k, n - k), unsafe { (p + i).as_non_null() })); }
+  if k > n  { return unsafe { alloc_slow(x, y) }; }
 
-  return unsafe { alloc_slow::<E>(x, y) };
+  let u = Span::new(p + k, n - k);
+  let v = unsafe { (p + i).as_non_null() };
+
+  return (u, Ok(v));
 }
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow<E: Fail>(x: Span, y: Layout) -> Result<(Span, NonNull<u8>), E> {
+unsafe fn alloc_slow<E: Fail>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>) {
   // TODO
   let _ = x;
   let _ = y;
   if std::hint::black_box(true) {
-    E::fail(Error::GlobalAllocatorFailed)
+    (Span::new(NULL, 0), E::fail(Error::GlobalAllocatorFailed))
   } else {
-    Ok((Span::new(NULL, 0), NonNull::dangling()))
+    (Span::new(NULL, 0), Ok(NonNull::dangling()))
   }
 }
 
 #[inline(always)]
 fn alloc_impl<'a, E: Fail>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<NonNull<u8>, E> {
-  let (x, y) = unsafe { alloc_fast(allocator.0, layout) }?;
+  let (x, y) = unsafe { alloc_fast(allocator.0, layout) };
   allocator.0 = x;
-  Ok(y)
+  y
 }
 
 #[inline(always)]
 fn alloc<'a, T, E: Fail>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E> {
-  let x = alloc_impl(allocator, Layout::new::<T>())?;
-  let x = unsafe { ptr::from(x).as_mut_ref() };
+  let x = ptr::from(alloc_impl(allocator, Layout::new::<T>())?);
+  let x = unsafe { x.as_mut_ref() };
+  Ok(x)
+}
+
+#[inline(always)]
+fn alloc_layout<'a, E: Fail>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<&'a mut Slot<[u8]>, E> {
+  let x = ptr::from(alloc_impl(allocator, layout)?);
+  let x = x.as_slice_mut_ptr::<u8>(layout.size());
+  let x = unsafe { &mut *std::mem::transmute::<*mut [u8], *mut Slot<[u8]>>(x) };
+  Ok(x)
+}
+
+#[inline(always)]
+fn alloc_slice<'a, T, E: Fail>(allocator: &mut Allocator<'a>, len: usize) -> Result<&'a mut Slot<[T]>, E> {
+  if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
+    return E::fail(Error::LayoutOverflow);
+  }
+
+  let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
+  let x = ptr::from(alloc_impl(allocator, l)?);
+  let x = x.as_slice_mut_ptr::<T>(len);
+  let x = unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(x) };
+  Ok(x)
+}
+
+#[inline(always)]
+fn copy_slice<'a, T, E>(allocator: &mut Allocator<'a>, src: &[T]) -> Result<&'a mut [T], E>
+where
+  T: Copy,
+  E: Fail
+{
+  let x = ptr::from(alloc_impl(allocator, Layout::for_value(src))?);
+  unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, src.len()) };
+  let x = unsafe { x.as_slice_mut_ref::<T>(src.len()) };
+  Ok(x)
+}
+
+#[inline(always)]
+fn copy_str<'a, E>(allocator: &mut Allocator<'a>, src: &str) -> Result<&'a mut str, E>
+where
+  E: Fail
+{
+  let x = copy_slice(allocator, src.as_bytes())?;
+  let x = unsafe { std::str::from_utf8_unchecked_mut(x) };
   Ok(x)
 }
 
@@ -271,46 +321,33 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
 
 impl<'a> Allocator<'a> {
   #[inline(always)]
-  fn alloc_internal(&mut self, layout: Layout) -> ptr {
-    match unsafe { alloc_fast::<Panicked>(self.0, layout) } {
-      Err(e) => { match e { } }
-      Ok((x, y)) => {
-        self.0 = x;
-        ptr::from(y)
-      }
-    }
-    /*
-    let (x, y) = unsafe { alloc_fast::<UnwindMode>(self.0, layout) };
-    self.0 = x;
-    ptr::from(y)
-    */
+  pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
+    unwrap(alloc(self))
   }
 
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
-    match alloc::<T, Panicked>(self) {
-      Err(e) => { match e { } }
-      Ok(x) => x
-    }
+  pub fn try_alloc<T>(&mut self) -> Result<&'a mut Slot<T>, AllocError> {
+    alloc(self)
   }
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut Slot<[u8]> {
-    let x = self.alloc_internal(layout);
-    let x = x.as_slice_mut_ptr::<u8>(layout.size());
-    unsafe { &mut *std::mem::transmute::<*mut [u8], *mut Slot<[u8]>>(x) }
+    unwrap(alloc_layout(self, layout))
+  }
+
+  #[inline(always)]
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut Slot<[u8]>, AllocError> {
+    alloc_layout(self, layout)
   }
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> &'a mut Slot<[T]> {
-    if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
-      fail(Error::LayoutOverflow)
-    }
+    unwrap(alloc_slice(self, len))
+  }
 
-    let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-    let x = self.alloc_internal(l);
-    let x = x.as_slice_mut_ptr::<T>(len);
-    unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(x) }
+  #[inline(always)]
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<&'a mut Slot<[T]>, AllocError> {
+    alloc_slice(self, len)
   }
 
   #[inline(always)]
@@ -318,16 +355,25 @@ impl<'a> Allocator<'a> {
   where
     T: Copy
   {
-    let x = ptr::from(src);
-    let y = self.alloc_internal(Layout::for_value(src));
-    unsafe { ptr::copy_nonoverlapping::<T>(x, y, src.len()) };
-    unsafe { y.as_slice_mut_ref::<T>(src.len()) }
+    unwrap(copy_slice(self, src))
+  }
+
+  #[inline(always)]
+  pub fn try_copy_slice<T>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError>
+  where
+    T: Copy
+  {
+    copy_slice(self, src)
   }
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
-    let x = self.copy_slice(src.as_bytes());
-    unsafe { std::str::from_utf8_unchecked_mut(x) }
+    unwrap(copy_str(self, src))
+  }
+
+  #[inline(always)]
+  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
+    copy_str(self, src)
   }
 }
 
@@ -443,3 +489,8 @@ pub fn aaa4<'a>(a: &mut Allocator<'a>, n: usize) -> &'a mut [u64] {
     y
   })
 }
+
+pub fn aaa5<'a>(a: &mut Allocator<'a>, x: u64) -> Result<&'a mut u64, AllocError> {
+  a.try_alloc().map(|s| s.init(x))
+}
+
