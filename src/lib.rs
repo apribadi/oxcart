@@ -20,15 +20,15 @@ pub struct Arena { root: ptr }
 
 pub struct Allocator<'a>(Cell<Span>, PhantomData<&'a mut ()>);
 
+#[derive(Clone, Copy, Debug)]
+pub struct AllocError;
+
 #[repr(transparent)]
 pub struct Slot<T>(T::Uninit)
 where
   T: ?Sized + Object;
 
 pub trait Object { type Uninit: ?Sized; }
-
-#[derive(Clone, Copy, Debug)]
-pub struct AllocError;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -56,10 +56,6 @@ const WORD: usize = size_of::<usize>();
 // PRIVATE TYPE AND TRAIT DEFINITIONS
 //
 ////////////////////////////////////////////////////////////////////////////////
-
-// +-=
-// |
-// |
 
 // NB:
 //
@@ -105,8 +101,8 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(x: Error) -> Result<T, Self> {
     match x {
-      Error::GlobalAllocatorFailed => panic!("global allocator failed!"),
-      Error::LayoutOverflow => panic!("layout overflow!"),
+      Error::GlobalAllocatorFailed => panic!("oxcart: global allocator failed!"),
+      Error::LayoutOverflow => panic!("oxcart: layout overflow!"),
     }
   }
 }
@@ -123,6 +119,10 @@ impl Fail for AllocError {
 // UTILITY FUNCTIONS
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+// SAFETY:
+//
+// - `x` must be `true`
 
 #[inline(always)]
 unsafe fn assume(x: bool) {
@@ -240,13 +240,13 @@ fn alloc_layout<'a, E>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<
 where
   E: Fail
 {
-  let s = allocator.0.get_mut();
-  let (x, y) = unsafe { alloc_fast(*s, layout) };
-  *s = x;
-  let y = y?;
-  let y = ptr::from(y);
-  let y = unsafe { y.as_slice_mut_ref::<MaybeUninit<u8>>(layout.size()) };
-  Ok(y)
+  let x = allocator.0.get_mut();
+  let (y, o) = unsafe { alloc_fast(*x, layout) };
+  *x = y;
+  let o = o?;
+  let o = ptr::from(o);
+  let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<u8>>(layout.size()) };
+  Ok(o)
 }
 
 #[inline(always)]
@@ -254,10 +254,10 @@ fn alloc<'a, T, E>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
 where
   E: Fail
 {
-  let x = alloc_layout(allocator, Layout::new::<T>())?;
-  let x = ptr::from(x);
-  let x = unsafe { x.as_mut_ref() };
-  Ok(x)
+  let o = alloc_layout(allocator, Layout::new::<T>())?;
+  let o = ptr::from(o);
+  let o = unsafe { o.as_mut_ref() };
+  Ok(o)
 }
 
 #[inline(always)]
@@ -270,11 +270,11 @@ where
   }
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = alloc_layout(allocator, l)?;
-  let x = ptr::from(x);
-  let x = x.as_slice_mut_ptr::<T>(len);
-  let x = unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(x) };
-  Ok(x)
+  let o = alloc_layout(allocator, l)?;
+  let o = ptr::from(o);
+  let o = o.as_slice_mut_ptr::<T>(len);
+  let o = unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(o) };
+  Ok(o)
 }
 
 #[inline(always)]
@@ -283,11 +283,11 @@ where
   T: Copy,
   E: Fail
 {
-  let x = alloc_layout(allocator, Layout::for_value(src))?;
-  let x = ptr::from(x);
-  unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, src.len()) };
-  let x = unsafe { x.as_slice_mut_ref::<T>(src.len()) };
-  Ok(x)
+  let o = alloc_layout(allocator, Layout::for_value(src))?;
+  let o = ptr::from(o);
+  unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), o, src.len()) };
+  let o = unsafe { o.as_slice_mut_ref::<T>(src.len()) };
+  Ok(o)
 }
 
 #[inline(always)]
@@ -295,9 +295,9 @@ fn copy_str<'a, E>(allocator: &mut Allocator<'a>, src: &str) -> Result<&'a mut s
 where
   E: Fail
 {
-  let x = copy_slice(allocator, src.as_bytes())?;
-  let x = unsafe { std::str::from_utf8_unchecked_mut(x) };
-  Ok(x)
+  let o = copy_slice(allocator, src.as_bytes())?;
+  let o = unsafe { std::str::from_utf8_unchecked_mut(o) };
+  Ok(o)
 }
 
 /*

@@ -27,7 +27,7 @@ impl ptr {
 
   /// An invalid pointer with address zero.
 
-  pub const NULL: ptr = ptr::invalid(0);
+  pub const NULL: ptr = Self::invalid(0);
 
   /// Gets the address of the pointer.
 
@@ -108,6 +108,16 @@ impl ptr {
     self.addr().wrapping_sub(other.addr())
   }
 
+  #[inline(always)]
+  pub const fn gep<T>(self, index: isize) -> ptr {
+    self.offset((core::mem::size_of::<T>() as isize).wrapping_mul(index))
+  }
+
+  #[inline(always)]
+  pub fn neg(self) -> usize {
+    self.addr().wrapping_neg()
+  }
+
   /// Computes the offset needed to add to `x` to align it to an address that
   /// is a multiple of `align`.
   ///
@@ -115,12 +125,7 @@ impl ptr {
 
   #[inline(always)]
   pub fn align_offset(self, align: usize) -> usize {
-    self.addr().wrapping_neg() & align - 1
-  }
-
-  #[inline(always)]
-  pub const fn gep<T>(self, index: isize) -> ptr {
-    self.offset((core::mem::size_of::<T>() as isize).wrapping_mul(index))
+    self.neg() & align - 1
   }
 
   /// # Safety:
@@ -282,35 +287,35 @@ impl ptr {
 impl<T: ?Sized> From<*const T> for ptr {
   #[inline(always)]
   fn from(value: *const T) -> ptr {
-    ptr::from_const_ptr(value)
+    Self::from_const_ptr(value)
   }
 }
 
 impl<T: ?Sized> From<*mut T> for ptr {
   #[inline(always)]
   fn from(value: *mut T) -> ptr {
-    ptr::from_mut_ptr(value)
+    Self::from_mut_ptr(value)
   }
 }
 
 impl<T: ?Sized> From<&T> for ptr {
   #[inline(always)]
   fn from(value: &T) -> ptr {
-    ptr::from_ref(value)
+    Self::from_ref(value)
   }
 }
 
 impl<T: ?Sized> From<&mut T> for ptr {
   #[inline(always)]
   fn from(value: &mut T) -> ptr {
-    ptr::from_mut_ref(value)
+    Self::from_mut_ref(value)
   }
 }
 
 impl<T: ?Sized> From<core::ptr::NonNull<T>> for ptr {
   #[inline(always)]
   fn from(value: core::ptr::NonNull<T>) -> ptr {
-    ptr::from_non_null(value)
+    Self::from_non_null(value)
   }
 }
 
@@ -406,7 +411,7 @@ impl core::ops::Neg for ptr {
 
   #[inline(always)]
   fn neg(self) -> usize {
-    self.addr().wrapping_neg()
+    self.neg()
   }
 }
 
