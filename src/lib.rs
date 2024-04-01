@@ -393,6 +393,16 @@ impl<'a> Allocator<'a> {
   }
 }
 
+impl<'a> std::fmt::Debug for Allocator<'a> {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let Span { ptr, len } = self.0.get();
+    f.debug_tuple("Allocator")
+      .field(&ptr)
+      .field(&len)
+      .finish()
+  }
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Slot
