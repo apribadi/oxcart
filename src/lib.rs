@@ -1,6 +1,7 @@
 use std::alloc::Layout;
-use std::cell::Cell;
+use std::alloc;
 use std::fmt;
+use std::hint::black_box;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
@@ -19,9 +20,9 @@ use pop::ptr;
 
 pub struct Arena { root: NonNull<Root> }
 
-pub struct Allocator<'a>(Cell<Span>, PhantomData<&'a mut ()>);
+pub struct Allocator<'a>(Span, PhantomData<&'a mut ()>);
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct AllocError;
 
 #[repr(transparent)]
@@ -30,27 +31,6 @@ where
   T: ?Sized + Object;
 
 pub trait Object { type Uninit: ?Sized; }
-
-////////////////////////////////////////////////////////////////////////////////
-//
-// CONSTANTS
-//
-////////////////////////////////////////////////////////////////////////////////
-
-/*
-#[cfg(not(test))]
-const IS_TEST: bool = false;
-
-#[cfg(test)]
-const IS_TEST: bool = true;
-
-const WORD_LOG2: usize = size_of::<usize>().ilog2() as usize;
-const SLAB_SIZE: usize = 1 << SLAB_LOG2;
-const SLAB_LOG2: usize = if IS_TEST { 3 } else { 12 - WORD_LOG2 };
-*/
-const NULL: ptr = ptr::NULL;
-const WORD: usize = size_of::<usize>();
-
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -80,42 +60,34 @@ struct Link {
 struct Root {
   link: Link,
   is_growing: bool,
+  total_allocated: usize,
 }
 
-const _: () = assert!(align_of::<Span>() <= WORD);
-const _: () = assert!(align_of::<Link>() <= WORD);
-const _: () = assert!(align_of::<Root>() <= WORD);
+const _: () = assert!(size_of::<Span>() % WORD == 0 && align_of::<Span>() == WORD);
+const _: () = assert!(size_of::<Link>() % WORD == 0 && align_of::<Link>() == WORD);
+const _: () = assert!(size_of::<Root>() % WORD == 0 && align_of::<Root>() == WORD);
 
-enum Panicked { }
-
-enum Error {
+enum ErrorInfo {
   LayoutOverflow,
   SystemAllocatorFailed(Layout),
   Unimplemented,
 }
 
+enum Panicked { }
+
 trait Fail: Sized {
-  fn fail<T>(_: Error) -> Result<T, Self>;
+  fn fail<T>(_: ErrorInfo) -> Result<T, Self>;
 }
 
-impl Fail for Panicked {
-  #[inline(never)]
-  #[cold]
-  fn fail<T>(x: Error) -> Result<T, Self> {
-    match x {
-      Error::LayoutOverflow => panic!("oxcart: layout overflow!"),
-      Error::SystemAllocatorFailed(layout) => std::alloc::handle_alloc_error(layout),
-      Error::Unimplemented => panic!("oxcart: unimplemented!"),
-    }
-  }
-}
+////////////////////////////////////////////////////////////////////////////////
+//
+// CONSTANTS
+//
+////////////////////////////////////////////////////////////////////////////////
 
-impl Fail for AllocError {
-  #[inline(always)]
-  fn fail<T>(_: Error) -> Result<T, Self> {
-    Err(AllocError)
-  }
-}
+const DEFAULT_INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
+const NULL: ptr = ptr::NULL;
+const WORD: usize = size_of::<usize>();
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -156,6 +128,43 @@ impl<T> Object for [T] {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
+// Panicked
+//
+////////////////////////////////////////////////////////////////////////////////
+
+impl Fail for Panicked {
+  #[inline(never)]
+  #[cold]
+  fn fail<T>(x: ErrorInfo) -> Result<T, Self> {
+    match x {
+      ErrorInfo::LayoutOverflow => panic!("oxcart: layout overflow!"),
+      ErrorInfo::SystemAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
+      ErrorInfo::Unimplemented => panic!("oxcart: unimplemented!"),
+    }
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// AllocError
+//
+////////////////////////////////////////////////////////////////////////////////
+
+impl Fail for AllocError {
+  #[inline(always)]
+  fn fail<T>(_: ErrorInfo) -> Result<T, Self> {
+    Err(AllocError)
+  }
+}
+
+impl fmt::Display for AllocError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.write_str("oxcart: failed to allocate memory")
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
 // Span
 //
 ////////////////////////////////////////////////////////////////////////////////
@@ -173,60 +182,64 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-const CHUNK: usize = 1 << 12;
-
-fn chunk<E>() -> Result<NonNull<u8>, E>
+fn chunk<E>(n: usize) -> Result<NonNull<u8>, E>
 where
   E: Fail
 {
-  let layout = Layout::from_size_align(CHUNK, WORD).unwrap();
-  let p = unsafe { std::alloc::alloc(layout) };
-  if p.is_null() { return E::fail(Error::SystemAllocatorFailed(layout)); }
-  let p = unsafe { NonNull::new_unchecked(p) };
-  Ok(p)
+  assert!(n > 0);
+
+  let layout = Layout::from_size_align(n, WORD).unwrap();
+  let p = unsafe { alloc::alloc(layout) };
+
+  match NonNull::new(p) {
+    None => E::fail(ErrorInfo::SystemAllocatorFailed(layout)),
+    Some(p) => Ok(p)
+  }
 }
 
-fn arena<E>() -> Result<Arena, E>
+fn arena<E>(n: usize) -> Result<Arena, E>
 where
   E: Fail
 {
-  let m = WORD - 1 + size_of::<Root>() & ! (WORD - 1);
-  let n = CHUNK - m;
-  let p = chunk()?;
+  let m = size_of::<Root>();
+  let n = usize::max(m, n);
+  let k = n - m & ! (WORD - 1);
+  let n = k + m;
+  let p = chunk(n)?;
   let p = ptr::from(p);
-  let r = p + n;
+  let r = p + k;
 
-  unsafe {
-    r.write(
-      Root {
-        link: Link { next: Span { ptr: p, len: n }, root: r, },
-        is_growing: false,
-      }
-    )
-  };
+  let x =
+    Root {
+      link: Link { next: Span { ptr: p, len: k }, root: NULL, },
+      is_growing: false,
+      total_allocated: n,
+    };
 
+  unsafe { r.write(x) };
   Ok(Arena { root: unsafe { r.as_non_null() } })
 }
 
 impl Arena {
   pub fn new() -> Self {
-    unwrap(arena())
+    unwrap(arena(DEFAULT_INITIAL_CHUNK_SIZE))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    arena()
+    arena(DEFAULT_INITIAL_CHUNK_SIZE)
   }
 
   pub fn allocator(&mut self) -> Allocator<'_> {
     let r = unsafe { ptr::from(self.root).as_mut_ref::<Root>() };
     r.is_growing = false;
-    Allocator(Cell::new(r.link.next), PhantomData)
+    Allocator(r.link.next, PhantomData)
   }
 }
 
 impl Drop for Arena {
   fn drop(&mut self) {
     let _ = self;
+    // TODO
   }
 }
 
@@ -269,74 +282,73 @@ where
   // TODO
   let _ = x;
   let _ = y;
-  if std::hint::black_box(true) {
-    (Span::new(NULL, 0), E::fail(Error::Unimplemented))
+  if black_box(true) {
+    (Span::new(NULL, 0), E::fail(ErrorInfo::Unimplemented))
   } else {
     (Span::new(NULL, 0), Ok(NonNull::dangling()))
   }
 }
 
 #[inline(always)]
-fn alloc_layout<'a, E>(allocator: &mut Allocator<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
+fn alloc_layout<'a, E>(x: &mut Allocator<'a>, y: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
 where
   E: Fail
 {
-  let x = allocator.0.get_mut();
-  let (y, o) = unsafe { alloc_fast(*x, layout) };
-  *x = y;
+  let (s, o) = unsafe { alloc_fast(x.0, y) };
+  x.0 = s;
   let o = o?;
   let o = ptr::from(o);
-  let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<u8>>(layout.size()) };
+  let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<u8>>(y.size()) };
   Ok(o)
 }
 
 #[inline(always)]
-fn alloc<'a, T, E>(allocator: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
+fn alloc<'a, T, E>(x: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
 where
   E: Fail
 {
-  let o = alloc_layout(allocator, Layout::new::<T>())?;
+  let o = alloc_layout(x, Layout::new::<T>())?;
   let o = ptr::from(o);
   let o = unsafe { o.as_mut_ref() };
   Ok(o)
 }
 
 #[inline(always)]
-fn alloc_slice<'a, T, E>(allocator: &mut Allocator<'a>, len: usize) -> Result<&'a mut Slot<[T]>, E>
+fn alloc_slice<'a, T, E>(x: &mut Allocator<'a>, y: usize) -> Result<&'a mut Slot<[T]>, E>
 where
   E: Fail
 {
-  if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
-    return E::fail(Error::LayoutOverflow);
+  if size_of::<T>() != 0 && y > isize::MAX as usize / size_of::<T>() {
+    return E::fail(ErrorInfo::LayoutOverflow);
   }
 
-  let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let o = alloc_layout(allocator, l)?;
+  let z = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * y, align_of::<T>()) };
+  let o = alloc_layout(x, z)?;
   let o = ptr::from(o);
-  let o = o.as_slice_mut_ptr::<T>(len);
+  let o = o.as_slice_mut_ptr::<T>(y);
   let o = unsafe { &mut *transmute::<*mut [T], *mut Slot<[T]>>(o) };
   Ok(o)
 }
 
 #[inline(always)]
-fn copy_slice<'a, T, E>(allocator: &mut Allocator<'a>, src: &[T]) -> Result<&'a mut [T], E>
+fn copy_slice<'a, T, E>(x: &mut Allocator<'a>, y: &[T]) -> Result<&'a mut [T], E>
 where
   T: Copy,
   E: Fail
 {
-  let o = alloc_layout(allocator, Layout::for_value(src))?;
+  let o = alloc_layout(x, Layout::for_value(y))?;
   let o = ptr::from(o);
-  unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), o, src.len()) };
-  let o = unsafe { o.as_slice_mut_ref::<T>(src.len()) };
+  unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(y), o, y.len()) };
+  let o = unsafe { o.as_slice_mut_ref::<T>(y.len()) };
   Ok(o)
 }
 
 #[inline(always)]
-fn copy_str<'a, E>(allocator: &mut Allocator<'a>, src: &str) -> Result<&'a mut str, E>
+fn copy_str<'a, E>(x: &mut Allocator<'a>, y: &str) -> Result<&'a mut str, E>
 where
   E: Fail
 {
-  let o = copy_slice(allocator, src.as_bytes())?;
+  let o = copy_slice(x, y.as_bytes())?;
   let o = unsafe { str::from_utf8_unchecked_mut(o) };
   Ok(o)
 }
@@ -359,10 +371,10 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
       ptr::as_mut_ref::<Root>(l)
     };
 
-  let c = std::alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD_SIZE));
+  let c = alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD_SIZE));
 
   if ptr::is_null(c) {
-    panic!("std::alloc::alloc failed!")
+    panic!("alloc::alloc failed!")
   }
 
   let _ = n;
@@ -436,10 +448,9 @@ impl<'a> Allocator<'a> {
 
 impl<'a> fmt::Debug for Allocator<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let Span { ptr, len } = self.0.get();
     f.debug_tuple("Allocator")
-      .field(&ptr)
-      .field(&len)
+      .field(&self.0.ptr)
+      .field(&self.0.len)
       .finish()
   }
 }
