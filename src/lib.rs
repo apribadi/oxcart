@@ -1,5 +1,3 @@
-pub mod pop;
-
 use std::alloc::Layout;
 use std::cell::Cell;
 use std::fmt;

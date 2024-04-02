@@ -1,7 +1,7 @@
 // use expect_test::expect;
 use oxcart::Arena;
 // use oxcart::Slot;
-use oxcart::pop::ptr;
+use pop::ptr;
 use std::alloc::Layout;
 
 #[test]
@@ -43,12 +43,13 @@ fn test_alloc_small() {
   let g = allocator.alloc().init(1_f64);
   let h = allocator.alloc().init(());
   let i = allocator.alloc().init(true);
-  let j = allocator.alloc().init([1_u8; 0]);
-  let k = allocator.alloc().init([1_u8; 1]);
-  let l = allocator.alloc().init([1_u8; 3]);
-  let m = allocator.alloc().init([1_u8; 5]);
-  let n = allocator.alloc().init([1_u8; 7]);
-  let o = allocator.alloc().init([1_u8; 9]);
+  let j = allocator.alloc().init((1_u8, 1_u128));
+  let k = allocator.alloc().init([1_u8; 0]);
+  let l = allocator.alloc().init([1_u8; 1]);
+  let m = allocator.alloc().init([1_u8; 3]);
+  let n = allocator.alloc().init([1_u8; 5]);
+  let o = allocator.alloc().init([1_u8; 7]);
+  let p = allocator.alloc().init([1_u8; 9]);
   *a = 0_u8;
   *b = 0_u16;
   *c = 0_u32;
@@ -58,12 +59,13 @@ fn test_alloc_small() {
   *g = 0_f64;
   *h = ();
   *i = false;
-  *j = [0_u8; 0];
-  *k = [0_u8; 1];
-  *l = [0_u8; 3];
-  *m = [0_u8; 5];
-  *n = [0_u8; 7];
-  *o = [0_u8; 9];
+  *j = (0_u8, 0_u128);
+  *k = [0_u8; 0];
+  *l = [0_u8; 1];
+  *m = [0_u8; 3];
+  *n = [0_u8; 5];
+  *o = [0_u8; 7];
+  *p = [0_u8; 9];
 }
 
 #[test]
@@ -97,20 +99,15 @@ fn test_linked_list() {
 
   let mut arena = Arena::new();
   let mut allocator = arena.allocator();
-
   let mut x: Option<&Node<'_, u64>> = None;
-
   for i in 0 .. 10 {
     x = Some(allocator.alloc().init(Node { car: i, cdr: x }));
   }
-
   let mut y = 0;
-
   while let Some(z) = x {
     y = y + z.car;
     x = z.cdr;
   }
-
   assert!(y == 45);
 }
 
@@ -131,18 +128,6 @@ fn test_too_big_allocation() {
 #[test]
 fn test_debug() {
   expect!["Arena { lo: 0x0000000000000001, hi: 0x0000000000000000 }"].assert_eq(&format!("{:?}", Arena::new()));
-}
-
-
-#[test]
-fn test_multiple_arena_refs_without_reset() {
-  let mut arena = Arena::new();
-  let mut arena_ref = &mut arena;
-  let _ = arena_ref.alloc().init(1);
-  let mut arena_ref = &mut arena;
-  let _ = arena_ref.alloc().init(2);
-  let mut arena_ref = &mut arena;
-  let _ = arena_ref.alloc().init(3);
 }
 
 */
