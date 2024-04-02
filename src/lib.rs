@@ -2,12 +2,15 @@ pub mod pop;
 
 use std::alloc::Layout;
 use std::cell::Cell;
+use std::fmt;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
 use std::mem::size_of;
+use std::mem::transmute;
 use std::ptr::NonNull;
+use std::str;
 use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -16,7 +19,7 @@ use pop::ptr;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Arena { root: ptr }
+pub struct Arena { root: NonNull<Root> }
 
 pub struct Allocator<'a>(Cell<Span>, PhantomData<&'a mut ()>);
 
@@ -88,8 +91,9 @@ const _: () = assert!(align_of::<Root>() <= WORD);
 enum Panicked { }
 
 enum Error {
-  GlobalAllocatorFailed,
   LayoutOverflow,
+  SystemAllocatorFailed(Layout),
+  Unimplemented,
 }
 
 trait Fail: Sized {
@@ -101,8 +105,9 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(x: Error) -> Result<T, Self> {
     match x {
-      Error::GlobalAllocatorFailed => panic!("oxcart: global allocator failed!"),
       Error::LayoutOverflow => panic!("oxcart: layout overflow!"),
+      Error::SystemAllocatorFailed(layout) => std::alloc::handle_alloc_error(layout),
+      Error::Unimplemented => panic!("oxcart: unimplemented!"),
     }
   }
 }
@@ -170,14 +175,52 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+const CHUNK: usize = 1 << 12;
+
+fn chunk<E>() -> Result<NonNull<u8>, E>
+where
+  E: Fail
+{
+  let layout = Layout::from_size_align(CHUNK, WORD).unwrap();
+  let p = unsafe { std::alloc::alloc(layout) };
+  if p.is_null() { return E::fail(Error::SystemAllocatorFailed(layout)); }
+  let p = unsafe { NonNull::new_unchecked(p) };
+  Ok(p)
+}
+
+fn arena<E>() -> Result<Arena, E>
+where
+  E: Fail
+{
+  let m = WORD - 1 + size_of::<Root>() & ! (WORD - 1);
+  let n = CHUNK - m;
+  let p = chunk()?;
+  let p = ptr::from(p);
+  let r = p + n;
+
+  unsafe {
+    r.write(
+      Root {
+        link: Link { next: Span { ptr: p, len: n }, root: r, },
+        is_growing: false,
+      }
+    )
+  };
+
+  Ok(Arena { root: unsafe { r.as_non_null() } })
+}
+
 impl Arena {
   pub fn new() -> Self {
-    // TODO
-    Self { root: NULL }
+    unwrap(arena())
+  }
+
+  pub fn try_new() -> Result<Self, AllocError> {
+    arena()
   }
 
   pub fn allocator(&mut self) -> Allocator<'_> {
-    let r = unsafe { self.root.as_mut_ref::<Root>() };
+    let r = unsafe { ptr::from(self.root).as_mut_ref::<Root>() };
     r.is_growing = false;
     Allocator(Cell::new(r.link.next), PhantomData)
   }
@@ -229,7 +272,7 @@ where
   let _ = x;
   let _ = y;
   if std::hint::black_box(true) {
-    (Span::new(NULL, 0), E::fail(Error::GlobalAllocatorFailed))
+    (Span::new(NULL, 0), E::fail(Error::Unimplemented))
   } else {
     (Span::new(NULL, 0), Ok(NonNull::dangling()))
   }
@@ -273,7 +316,7 @@ where
   let o = alloc_layout(allocator, l)?;
   let o = ptr::from(o);
   let o = o.as_slice_mut_ptr::<T>(len);
-  let o = unsafe { &mut *std::mem::transmute::<*mut [T], *mut Slot<[T]>>(o) };
+  let o = unsafe { &mut *transmute::<*mut [T], *mut Slot<[T]>>(o) };
   Ok(o)
 }
 
@@ -296,7 +339,7 @@ where
   E: Fail
 {
   let o = copy_slice(allocator, src.as_bytes())?;
-  let o = unsafe { std::str::from_utf8_unchecked_mut(o) };
+  let o = unsafe { str::from_utf8_unchecked_mut(o) };
   Ok(o)
 }
 
@@ -393,8 +436,8 @@ impl<'a> Allocator<'a> {
   }
 }
 
-impl<'a> std::fmt::Debug for Allocator<'a> {
-  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl<'a> fmt::Debug for Allocator<'a> {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let Span { ptr, len } = self.0.get();
     f.debug_tuple("Allocator")
       .field(&ptr)
