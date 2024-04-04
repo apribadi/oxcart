@@ -191,10 +191,11 @@ where
   let layout = Layout::from_size_align(n, WORD).unwrap();
   let p = unsafe { alloc::alloc(layout) };
 
-  match NonNull::new(p) {
-    None => E::fail(ErrorInfo::SystemAllocatorFailed(layout)),
-    Some(p) => Ok(p)
+  if let Some(p) = NonNull::new(p) {
+    return Ok(p);
   }
+
+  return E::fail(ErrorInfo::SystemAllocatorFailed(layout));
 }
 
 fn arena<E>(n: usize) -> Result<Arena, E>
@@ -230,7 +231,8 @@ impl Arena {
   }
 
   pub fn allocator(&mut self) -> Allocator<'_> {
-    let r = unsafe { ptr::from(self.root).as_mut_ref::<Root>() };
+    let r = ptr::from(self.root);
+    let r = unsafe { r.as_mut_ref::<Root>() };
     r.is_growing = false;
     Allocator(r.link.next, PhantomData)
   }
@@ -240,6 +242,17 @@ impl Drop for Arena {
   fn drop(&mut self) {
     let _ = self;
     // TODO
+  }
+}
+
+impl fmt::Debug for Arena {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let r = ptr::from(self.root);
+    let r = unsafe { r.as_ref::<Root>() };
+    let total_allocated = r.total_allocated;
+    f.debug_struct("Arena")
+      .field("total_allocated", &total_allocated)
+      .finish()
   }
 }
 
@@ -268,9 +281,9 @@ where
   if k > n  { return unsafe { alloc_slow(x, y) }; }
 
   let u = Span::new(p + k, n - k);
-  let v = unsafe { (p + i).as_non_null() };
+  let v = p + i;
 
-  return (u, Ok(v));
+  return (u, Ok(unsafe { v.as_non_null() }));
 }
 
 #[inline(never)]
@@ -309,8 +322,7 @@ where
 {
   let o = alloc_layout(x, Layout::new::<T>())?;
   let o = ptr::from(o);
-  let o = unsafe { o.as_mut_ref() };
-  Ok(o)
+  Ok(unsafe { o.as_mut_ref() })
 }
 
 #[inline(always)]
@@ -325,8 +337,8 @@ where
   let z = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * y, align_of::<T>()) };
   let o = alloc_layout(x, z)?;
   let o = ptr::from(o);
-  let o = o.as_slice_mut_ptr::<T>(y);
-  let o = unsafe { &mut *transmute::<*mut [T], *mut Slot<[T]>>(o) };
+  let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<T>>(y) };
+  let o = unsafe { transmute::<&mut [MaybeUninit<T>], &mut Slot<[T]>>(o) };
   Ok(o)
 }
 
@@ -481,7 +493,8 @@ impl<T, const N: usize> Slot<[T; N]> {
     // The layouts of `MaybeUninit<[T; N]>` and `[MaybeUninit<T>; N]` are
     // guaranteed to be the same.
 
-    unsafe { ptr::from(&mut self.0).as_mut_ref() }
+    let o = ptr::from(&mut self.0);
+    unsafe { o.as_mut_ref() }
   }
 
   #[inline(always)]
@@ -499,7 +512,8 @@ impl<T, const N: usize> Slot<[T; N]> {
     //
     // Every array element has been initialized.
 
-    unsafe { ptr::from(&mut self.0).as_mut_ref() }
+    let o = ptr::from(&mut self.0);
+    unsafe { o.as_mut_ref() }
   }
 }
 
@@ -524,7 +538,19 @@ impl<T> Slot<[T]> {
     //
     // Every slice element has been initialized.
 
-    unsafe { ptr::from(&mut self.0).as_slice_mut_ref(self.0.len()) }
+    let o = ptr::from(&mut self.0);
+    unsafe { o.as_slice_mut_ref(self.0.len()) }
+  }
+}
+
+impl<T> fmt::Debug for Slot<T>
+where
+  T: ?Sized + Object
+{
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_tuple("Slot")
+      .field(&ptr::from(&self.0))
+      .finish()
   }
 }
 

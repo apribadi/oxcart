@@ -1,6 +1,5 @@
-// use expect_test::expect;
+use expect_test::expect;
 use oxcart::Arena;
-// use oxcart::Slot;
 use pop::ptr;
 use std::alloc::Layout;
 
@@ -8,9 +7,8 @@ use std::alloc::Layout;
 fn test_api() {
   let mut arena = Arena::new();
   let _ = Arena::try_new();
-  // let _ = format!("{:?}", Arena::new());
+  let _ = format!("{:?}", arena);
   let mut allocator = arena.allocator();
-  let _ = format!("{:?}", Arena::new().allocator());
   let _ = allocator.alloc_layout(Layout::new::<u64>());
   let _ = allocator.try_alloc_layout(Layout::new::<u64>());
   let _ = allocator.alloc::<u64>();
@@ -27,7 +25,8 @@ fn test_api() {
   let _ = allocator.alloc::<[u64; 3]>().init_array(|i| i as u64);
   let _ = allocator.alloc_slice::<u64>(3).as_uninit_slice();
   let _ = allocator.alloc_slice::<u64>(3).init_slice(|i| i as u64);
-  // let _ = format!("{:?}", Arena::new().allocator().alloc::<u64>());
+  let _ = format!("{:?}", allocator);
+  let _ = format!("{:?}", allocator.alloc::<u64>());
 }
 
 #[test]
@@ -79,7 +78,6 @@ fn test_alloc_zero_sized() {
   let _ = allocator.alloc_slice(5).init_slice(|_| ());
 }
 
-
 #[test]
 fn test_alloc_aligned() {
   let mut arena = Arena::new();
@@ -89,6 +87,20 @@ fn test_alloc_aligned() {
     assert!(ptr::from(p).addr() & (align - 1) == 0);
   }
 }
+
+/*
+#[test]
+fn test_format() {
+  let mut arena = Arena::new();
+  expect!["Arena { total_allocated: 16384 }"].assert_eq(&format!("{:?}", arena));
+  let mut allocator = arena.allocator();
+  expect!["Allocator(0x000000015b808200, 16344)"].assert_eq(&format!("{:?}", allocator));
+  let a = allocator.alloc::<u64>();
+  expect!["Slot(0x000000015b808200)"].assert_eq(&format!("{:?}", a));
+  let b = allocator.alloc::<u64>();
+  expect!["Slot(0x000000015b808208)"].assert_eq(&format!("{:?}", b));
+}
+*/
 
 #[test]
 fn test_linked_list() {
@@ -108,7 +120,7 @@ fn test_linked_list() {
     y = y + z.car;
     x = z.cdr;
   }
-  assert!(y == 45);
+  expect!["45"].assert_eq(&format!("{:?}", y));
 }
 
 /*
@@ -124,51 +136,34 @@ fn test_too_big_allocation() {
 }
 */
 
-/*
-#[test]
-fn test_debug() {
-  expect!["Arena { lo: 0x0000000000000001, hi: 0x0000000000000000 }"].assert_eq(&format!("{:?}", Arena::new()));
-}
-
-*/
-
-/*
 #[test]
 fn test_demo() {
   let mut arena = Arena::new();
+  let mut allocator = arena.allocator();
 
-  let mut arena_ref = &mut arena;
-
-  let x = arena_ref.alloc().init(0);
-  let y = arena_ref.alloc().init(0);
-  let z = arena_ref.alloc().init(0);
+  let x = allocator.alloc().init(0);
+  let y = allocator.alloc().init(0);
+  let z = allocator.alloc().init(0);
 
   *x = 1;
   *y = 2;
   *z = 3;
 
-  assert!(*x + *y + *z == 6);
+  expect!["6"].assert_eq(&format!("{:?}", *x + *y + *z));
 
-  arena.reset();
+  let mut allocator = arena.allocator();
 
-  let mut arena_ref = &mut arena;
+  // let _ = allocator.alloc::<[u64; 100000]>(); // TODO
+  let _ = allocator.alloc::<[u64; 0]>();
+  let _ = allocator.alloc::<[u64; 1]>();
 
-  let _ = arena_ref.alloc::<[u64; 100000]>();
-  let _ = arena_ref.alloc::<[u64; 0]>();
-  let _ = arena_ref.alloc::<[u64; 1]>();
+  let mut allocator = arena.allocator();
 
-  arena.reset();
+  let x = allocator.alloc_slice(3).init_slice(|i| (i as u64) + 1);
+  let y = allocator.alloc_layout(Layout::new::<[u64; 10]>());
+  let z: &mut dyn std::fmt::Debug = allocator.alloc().init(13u64);
 
-  let mut arena_ref = &mut arena;
-
-  let x = arena_ref.alloc_slice(3).init_slice(|i| (i as u64) + 1);
-  let y = arena_ref.alloc_layout(Layout::new::<[u64; 10]>());
-  let z: &mut dyn fmt::Debug = arena_ref.alloc().init(13u64);
-
-  assert!(x[0] + x[1] + x[2] == 6);
-  assert!(y.len() == 80);
-  assert!(&format!("{z:?}") == "13");
-
-  arena.reset();
+  expect!["6"].assert_eq(&format!("{:?}", x[0] + x[1] + x[2]));
+  expect!["80"].assert_eq(&format!("{:?}", y.len()));
+  expect!["13"].assert_eq(&format!("{:?}", z));
 }
-*/
