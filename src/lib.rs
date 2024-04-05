@@ -21,12 +21,12 @@ pub struct Arena { root: NonNull<Root> }
 
 pub struct Allocator<'a>(Span, PhantomData<&'a ()>);
 
-#[derive(Debug)]
-pub struct AllocError;
-
 pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
 where
   T: ?Sized;
+
+#[derive(Debug)]
+pub struct AllocError;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -279,8 +279,8 @@ where
   E: Fail
 {
   // TODO
-  let _ = x;
-  let _ = y;
+  let _ = core::hint::black_box(x);
+  let _ = core::hint::black_box(y);
 
   let r: &mut Root = {
     let t = x.ptr + x.len; // tail
