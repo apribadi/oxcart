@@ -1,3 +1,4 @@
+use pop::ptr;
 use std::alloc::Layout;
 use std::alloc;
 use std::fmt;
@@ -7,10 +8,8 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
 use std::mem::size_of;
-use std::mem::transmute;
 use std::ptr::NonNull;
 use std::str;
-use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -20,17 +19,14 @@ use pop::ptr;
 
 pub struct Arena { root: NonNull<Root> }
 
-pub struct Allocator<'a>(Span, PhantomData<&'a mut ()>);
+pub struct Allocator<'a>(Span, PhantomData<&'a ()>);
 
 #[derive(Debug)]
 pub struct AllocError;
 
-#[repr(transparent)]
-pub struct Slot<T>(T::Uninit)
+pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
 where
-  T: ?Sized + Object;
-
-pub trait Object { type Uninit: ?Sized; }
+  T: ?Sized;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -68,7 +64,7 @@ const _: () = assert!(size_of::<Link>() % WORD == 0 && align_of::<Link>() == WOR
 const _: () = assert!(size_of::<Root>() % WORD == 0 && align_of::<Root>() == WORD);
 
 enum ErrorInfo {
-  LayoutOverflow,
+  AllocSizeTooLarge,
   SystemAllocatorFailed(Layout),
   Unimplemented,
 }
@@ -86,6 +82,7 @@ trait Fail: Sized {
 ////////////////////////////////////////////////////////////////////////////////
 
 const DEFAULT_INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
+const MAX_CHUNK_SIZE: usize = usize::MAX / 4 + 1;
 const NULL: ptr = ptr::NULL;
 const WORD: usize = size_of::<usize>();
 
@@ -114,20 +111,6 @@ fn unwrap<T>(x: Result<T, Panicked>) -> T {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Object
-//
-////////////////////////////////////////////////////////////////////////////////
-
-impl<T> Object for T {
-  type Uninit = MaybeUninit<T>;
-}
-
-impl<T> Object for [T] {
-  type Uninit = [MaybeUninit<T>];
-}
-
-////////////////////////////////////////////////////////////////////////////////
-//
 // Panicked
 //
 ////////////////////////////////////////////////////////////////////////////////
@@ -137,7 +120,7 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(x: ErrorInfo) -> Result<T, Self> {
     match x {
-      ErrorInfo::LayoutOverflow => panic!("oxcart: layout overflow!"),
+      ErrorInfo::AllocSizeTooLarge => panic!("oxcart: alloc size too large!"),
       ErrorInfo::SystemAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
       ErrorInfo::Unimplemented => panic!("oxcart: unimplemented!"),
     }
@@ -187,6 +170,7 @@ where
   E: Fail
 {
   assert!(n > 0);
+  assert!(n <= MAX_CHUNK_SIZE);
 
   let layout = Layout::from_size_align(n, WORD).unwrap();
   let p = unsafe { alloc::alloc(layout) };
@@ -203,7 +187,7 @@ where
   E: Fail
 {
   let m = size_of::<Root>();
-  let n = usize::max(m, n);
+  let n = n.clamp(m, MAX_CHUNK_SIZE);
   let k = n - m & ! (WORD - 1);
   let n = k + m;
   let p = chunk(n)?;
@@ -218,7 +202,8 @@ where
     };
 
   unsafe { r.write(x) };
-  Ok(Arena { root: unsafe { r.as_non_null() } })
+  let r = unsafe { r.as_non_null() };
+  Ok(Arena { root: r })
 }
 
 impl Arena {
@@ -269,8 +254,8 @@ where
 {
   let p = x.ptr;
   let n = x.len;
-  let a = y.align();
   let s = y.size();
+  let a = y.align();
 
   unsafe { assume(p.addr() & WORD - 1 == 0) };
 
@@ -282,8 +267,9 @@ where
 
   let u = Span::new(p + k, n - k);
   let v = p + i;
+  let v = unsafe { v.as_non_null() };
 
-  return (u, Ok(unsafe { v.as_non_null() }));
+  return (u, Ok(v));
 }
 
 #[inline(never)]
@@ -295,6 +281,24 @@ where
   // TODO
   let _ = x;
   let _ = y;
+
+  let r: &mut Root = {
+    let t = x.ptr + x.len; // tail
+    let t = t.as_mut_ref::<Link>();
+    let r = t.root;
+    let r = if r.is_null() { ptr::from(t) } else { r };
+    r.as_mut_ref::<Root>()
+  };
+
+  // let s = y.size();
+  // let a = y.align();
+  // let n = usize::max(a, WORD) - WORD + s;
+  let n = usize::max(r.link.next.len, r.total_allocated / 4 + 1);
+  let n = n.next_power_of_two();
+  // next power of two
+
+  let _ = n;
+
   if black_box(true) {
     (Span::new(NULL, 0), E::fail(ErrorInfo::Unimplemented))
   } else {
@@ -316,30 +320,30 @@ where
 }
 
 #[inline(always)]
-fn alloc<'a, T, E>(x: &mut Allocator<'a>) -> Result<&'a mut Slot<T>, E>
+fn alloc<'a, T, E>(x: &mut Allocator<'a>) -> Result<Slot<'a, T>, E>
 where
   E: Fail
 {
   let o = alloc_layout(x, Layout::new::<T>())?;
   let o = ptr::from(o);
-  Ok(unsafe { o.as_mut_ref() })
+  let o = unsafe { o.as_non_null::<T>() };
+  Ok(Slot(o, PhantomData))
 }
 
 #[inline(always)]
-fn alloc_slice<'a, T, E>(x: &mut Allocator<'a>, y: usize) -> Result<&'a mut Slot<[T]>, E>
+fn alloc_slice<'a, T, E>(x: &mut Allocator<'a>, y: usize) -> Result<Slot<'a, [T]>, E>
 where
   E: Fail
 {
-  if size_of::<T>() != 0 && y > isize::MAX as usize / size_of::<T>() {
-    return E::fail(ErrorInfo::LayoutOverflow);
+  if size_of::<T>() != 0 && y > MAX_CHUNK_SIZE / size_of::<T>() {
+    return E::fail(ErrorInfo::AllocSizeTooLarge);
   }
 
   let z = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * y, align_of::<T>()) };
   let o = alloc_layout(x, z)?;
   let o = ptr::from(o);
-  let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<T>>(y) };
-  let o = unsafe { transmute::<&mut [MaybeUninit<T>], &mut Slot<[T]>>(o) };
-  Ok(o)
+  let o = unsafe { o.as_slice_non_null(y) };
+  Ok(Slot(o, PhantomData))
 }
 
 #[inline(always)]
@@ -412,22 +416,22 @@ impl<'a> Allocator<'a> {
   }
 
   #[inline(always)]
-  pub fn alloc<T>(&mut self) -> &'a mut Slot<T> {
+  pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     unwrap(alloc(self))
   }
 
   #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<&'a mut Slot<T>, AllocError> {
+  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     alloc(self)
   }
 
   #[inline(always)]
-  pub fn alloc_slice<T>(&mut self, len: usize) -> &'a mut Slot<[T]> {
+  pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
     unwrap(alloc_slice(self, len))
   }
 
   #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<&'a mut Slot<[T]>, AllocError> {
+  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
     alloc_slice(self, len)
   }
 
@@ -473,86 +477,73 @@ impl<'a> fmt::Debug for Allocator<'a> {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<T> Slot<T> {
-  #[inline(always)]
-  pub fn as_uninit(&mut self) -> &mut MaybeUninit<T> {
-    &mut self.0
-  }
+unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
 
+unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
+
+impl<'a, T> Slot<'a, T> {
   #[inline(always)]
-  pub fn init(&mut self, value: T) -> &mut T {
-    self.0.write(value)
+  pub fn init(self, value: T) -> &'a mut T {
+    let x = ptr::from(self.0);
+    unsafe { x.write(value) };
+    unsafe { x.as_mut_ref() }
   }
 }
 
-impl<T, const N: usize> Slot<[T; N]> {
+impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   #[inline(always)]
-  pub fn as_uninit_array(&mut self) -> &mut [MaybeUninit<T>; N] {
-    // SAFETY:
-    //
-    // The layouts of `MaybeUninit<[T; N]>` and `[MaybeUninit<T>; N]` are
-    // guaranteed to be the same.
-
-    let o = ptr::from(&mut self.0);
-    unsafe { o.as_mut_ref() }
-  }
-
-  #[inline(always)]
-  pub fn init_array<F>(&mut self, f: F) -> &mut [T; N]
+  pub fn init_array<F>(self, f: F) -> &'a mut [T; N]
   where
     F: FnMut(usize) -> T
   {
     let mut f = f;
+    let x = ptr::from(self.0);
 
-    for (i, x) in self.as_uninit_array().iter_mut().enumerate() {
-      let _: _ = x.write(f(i));
+    for i in 0 .. N {
+      let y = x + size_of::<T>() * i;
+      unsafe { y.write(f(i)) };
     }
 
     // SAFETY:
     //
     // Every array element has been initialized.
 
-    let o = ptr::from(&mut self.0);
-    unsafe { o.as_mut_ref() }
+    unsafe { x.as_mut_ref() }
   }
 }
 
-impl<T> Slot<[T]> {
+impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
-  pub fn as_uninit_slice(&mut self) -> &mut [MaybeUninit<T>] {
-    &mut self.0
-  }
-
-  #[inline(always)]
-  pub fn init_slice<F>(&mut self, f: F) -> &mut [T]
+  pub fn init_slice<F>(self, f: F) -> &'a mut [T]
   where
     F: FnMut(usize) -> T
   {
     let mut f = f;
+    let x = ptr::from(self.0);
+    let n = self.0.len();
 
-    for (i, x) in self.as_uninit_slice().iter_mut().enumerate() {
-      let _: _ = x.write(f(i));
+    for i in 0 .. n {
+      let y = x + size_of::<T>() * i;
+      unsafe { y.write(f(i)) };
     }
 
     // SAFETY:
     //
     // Every slice element has been initialized.
 
-    let o = ptr::from(&mut self.0);
-    unsafe { o.as_slice_mut_ref(self.0.len()) }
+    unsafe { x.as_slice_mut_ref(n) }
   }
 }
 
-impl<T> fmt::Debug for Slot<T>
-where
-  T: ?Sized + Object
-{
+impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_tuple("Slot")
       .field(&ptr::from(&self.0))
       .finish()
   }
 }
+
+////////////////////////////////////////////////////////////////////////////////
 
 pub fn foo<'a>(a: &mut Allocator<'a>, n: usize) {
   // let mut a = a;

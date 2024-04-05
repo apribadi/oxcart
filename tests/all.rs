@@ -19,11 +19,8 @@ fn test_api() {
   let _ = allocator.try_copy_slice::<u64>(&[0, 1, 2]);
   let _ = allocator.copy_str("hello");
   let _ = allocator.try_copy_str("hello");
-  let _ = allocator.alloc::<u64>().as_uninit();
   let _ = allocator.alloc::<u64>().init(13);
-  let _ = allocator.alloc::<[u64; 3]>().as_uninit_array();
   let _ = allocator.alloc::<[u64; 3]>().init_array(|i| i as u64);
-  let _ = allocator.alloc_slice::<u64>(3).as_uninit_slice();
   let _ = allocator.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", allocator);
   let _ = format!("{:?}", allocator.alloc::<u64>());
