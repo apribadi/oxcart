@@ -1,6 +1,7 @@
 use pop::ptr;
 use std::alloc::Layout;
 use std::alloc;
+use std::cell::Cell;
 use std::fmt;
 use std::hint::black_box;
 use std::hint::unreachable_unchecked;
@@ -19,7 +20,7 @@ use std::str;
 
 pub struct Store { root: NonNull<Root> }
 
-pub struct Arena<'a>(Span, PhantomData<&'a ()>);
+pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
 
 pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
 where
@@ -82,7 +83,7 @@ trait Fail: Sized {
 ////////////////////////////////////////////////////////////////////////////////
 
 const DEFAULT_INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
-const MAX_CHUNK_SIZE: usize = usize::MAX / 4 + 1;
+const MAX_CHUNK_SIZE: usize = isize::MAX as usize + 1 - WORD;
 const NULL: ptr = ptr::NULL;
 const WORD: usize = size_of::<usize>();
 
@@ -219,7 +220,7 @@ impl Store {
     let r = ptr::from(self.root);
     let r = unsafe { r.as_mut_ref::<Root>() };
     r.is_growing = false;
-    Arena(r.link.next, PhantomData)
+    Arena(Cell::new(r.link.next), PhantomData)
   }
 }
 
@@ -246,6 +247,8 @@ impl fmt::Debug for Store {
 // Arena
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+impl<'a> std::panic::RefUnwindSafe for Arena<'a> { }
 
 #[inline(always)]
 unsafe fn alloc_fast<E>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>)
@@ -311,8 +314,9 @@ fn alloc_layout<'a, E>(x: &mut Arena<'a>, y: Layout) -> Result<&'a mut [MaybeUni
 where
   E: Fail
 {
-  let (s, o) = unsafe { alloc_fast(x.0, y) };
-  x.0 = s;
+  let x = x.0.get_mut();
+  let (s, o) = unsafe { alloc_fast(*x, y) };
+  *x = s;
   let o = o?;
   let o = ptr::from(o);
   let o = unsafe { o.as_slice_mut_ref::<MaybeUninit<u8>>(y.size()) };
@@ -464,9 +468,10 @@ impl<'a> Arena<'a> {
 
 impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    let x = self.0.get();
     f.debug_tuple("Arena")
-      .field(&self.0.ptr)
-      .field(&self.0.len)
+      .field(&x.ptr)
+      .field(&x.len)
       .finish()
   }
 }
@@ -490,7 +495,9 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
-    self.as_uninit().write(value)
+    let x = ptr::from(self.0);
+    unsafe { x.write(value) }
+    unsafe { x.as_mut_ref() }
   }
 }
 
@@ -506,14 +513,16 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   where
     F: FnMut(usize) -> T
   {
+    let x = ptr::from(self.0);
     let mut f = f;
-    let x = self.as_uninit_array();
+    let mut i = 0;
+    let mut y = x;
 
-    for (i, y) in x.iter_mut().enumerate() {
-      let _: _ = y.write(f(i));
+    while i < N {
+      unsafe { y.write(f(i)) };
+      i = i + 1;
+      y = y + size_of::<T>();
     }
-
-    let x = ptr::from(x);
 
     // SAFETY:
     //
@@ -536,15 +545,17 @@ impl<'a, T> Slot<'a, [T]> {
   where
     F: FnMut(usize) -> T
   {
+    let n = self.0.len();
+    let x = ptr::from(self.0);
     let mut f = f;
-    let x = self.as_uninit_slice();
+    let mut i = 0;
+    let mut y = x;
 
-    for (i, y) in x.iter_mut().enumerate() {
-      let _: _ = y.write(f(i));
+    while i < n {
+      unsafe { y.write(f(i)) };
+      i = i + 1;
+      y = y + size_of::<T>();
     }
-
-    let n = x.len();
-    let x = ptr::from(x);
 
     // SAFETY:
     //
@@ -559,6 +570,37 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
     f.debug_tuple("Slot")
       .field(&ptr::from(&self.0))
       .finish()
+  }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+//
+// Allocator API
+//
+////////////////////////////////////////////////////////////////////////////////
+
+unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
+  #[inline(always)]
+  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, allocator_api2::alloc::AllocError> {
+    let s = self.0.get();
+    let (s, o) = unsafe { alloc_fast::<AllocError>(s, layout) };
+    self.0.set(s);
+
+    if let Ok(o) = o {
+      let n = layout.size();
+      let o = ptr::from(o);
+      let o = unsafe { o.as_slice_non_null(n) };
+      return Ok(o);
+    }
+
+    return Err(allocator_api2::alloc::AllocError);
+  }
+
+  #[inline(always)]
+  unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
+    let _ = self;
+    let _ = ptr;
+    let _ = layout;
   }
 }
 

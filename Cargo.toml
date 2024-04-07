@@ -19,6 +19,7 @@ unused_results = "warn"
 
 [dependencies]
 pop = { git = "https://github.com/apribadi/pop.git" }
+allocator-api2 = "0.2.16"
 
 [dev-dependencies]
 bumpalo = "3.12.0"
