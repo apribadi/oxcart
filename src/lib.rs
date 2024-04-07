@@ -483,26 +483,37 @@ unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 
 impl<'a, T> Slot<'a, T> {
   #[inline(always)]
-  pub fn init(self, value: T) -> &'a mut T {
+  pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
     let x = ptr::from(self.0);
-    unsafe { x.write(value) };
     unsafe { x.as_mut_ref() }
+  }
+
+  #[inline(always)]
+  pub fn init(self, value: T) -> &'a mut T {
+    self.as_uninit().write(value)
   }
 }
 
 impl<'a, T, const N: usize> Slot<'a, [T; N]> {
+  #[inline(always)]
+  pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
+    let x = ptr::from(self.0);
+    unsafe { x.as_mut_ref() }
+  }
+
   #[inline(always)]
   pub fn init_array<F>(self, f: F) -> &'a mut [T; N]
   where
     F: FnMut(usize) -> T
   {
     let mut f = f;
-    let x = ptr::from(self.0);
+    let x = self.as_uninit_array();
 
-    for i in 0 .. N {
-      let y = x + size_of::<T>() * i;
-      unsafe { y.write(f(i)) };
+    for (i, y) in x.iter_mut().enumerate() {
+      let _: _ = y.write(f(i));
     }
+
+    let x = ptr::from(x);
 
     // SAFETY:
     //
@@ -514,18 +525,26 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
 impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
+  pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
+    let n = self.0.len();
+    let x = ptr::from(self.0);
+    unsafe { x.as_slice_mut_ref(n) }
+  }
+
+  #[inline(always)]
   pub fn init_slice<F>(self, f: F) -> &'a mut [T]
   where
     F: FnMut(usize) -> T
   {
     let mut f = f;
-    let n = self.0.len();
-    let x = ptr::from(self.0);
+    let x = self.as_uninit_slice();
 
-    for i in 0 .. n {
-      let y = x + size_of::<T>() * i;
-      unsafe { y.write(f(i)) };
+    for (i, y) in x.iter_mut().enumerate() {
+      let _: _ = y.write(f(i));
     }
+
+    let n = x.len();
+    let x = ptr::from(x);
 
     // SAFETY:
     //
