@@ -1,6 +1,6 @@
 [package]
 authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
-categories = ["memory-management"]
+categories = ["memory-management", "rust-patterns"]
 description = "a fast arena allocator"
 edition = "2021"
 license = "Artistic-2.0"
