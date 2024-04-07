@@ -17,9 +17,9 @@ use std::str;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Arena { root: NonNull<Root> }
+pub struct Store { root: NonNull<Root> }
 
-pub struct Allocator<'a>(Span, PhantomData<&'a ()>);
+pub struct Arena<'a>(Span, PhantomData<&'a ()>);
 
 pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
 where
@@ -161,7 +161,7 @@ impl Span {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Arena
+// Store
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -182,7 +182,7 @@ where
   return E::fail(ErrorInfo::SystemAllocatorFailed(layout));
 }
 
-fn arena<E>(n: usize) -> Result<Arena, E>
+fn store<E>(n: usize) -> Result<Store, E>
 where
   E: Fail
 {
@@ -203,39 +203,39 @@ where
 
   unsafe { r.write(x) };
   let r = unsafe { r.as_non_null() };
-  Ok(Arena { root: r })
+  Ok(Store { root: r })
 }
 
-impl Arena {
+impl Store {
   pub fn new() -> Self {
-    unwrap(arena(DEFAULT_INITIAL_CHUNK_SIZE))
+    unwrap(store(DEFAULT_INITIAL_CHUNK_SIZE))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    arena(DEFAULT_INITIAL_CHUNK_SIZE)
+    store(DEFAULT_INITIAL_CHUNK_SIZE)
   }
 
-  pub fn allocator(&mut self) -> Allocator<'_> {
+  pub fn arena(&mut self) -> Arena<'_> {
     let r = ptr::from(self.root);
     let r = unsafe { r.as_mut_ref::<Root>() };
     r.is_growing = false;
-    Allocator(r.link.next, PhantomData)
+    Arena(r.link.next, PhantomData)
   }
 }
 
-impl Drop for Arena {
+impl Drop for Store {
   fn drop(&mut self) {
     let _ = self;
     // TODO
   }
 }
 
-impl fmt::Debug for Arena {
+impl fmt::Debug for Store {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     let r = ptr::from(self.root);
     let r = unsafe { r.as_ref::<Root>() };
     let total_allocated = r.total_allocated;
-    f.debug_struct("Arena")
+    f.debug_struct("Store")
       .field("total_allocated", &total_allocated)
       .finish()
   }
@@ -243,7 +243,7 @@ impl fmt::Debug for Arena {
 
 ////////////////////////////////////////////////////////////////////////////////
 //
-// Allocator
+// Arena
 //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -279,8 +279,8 @@ where
   E: Fail
 {
   // TODO
-  let _ = core::hint::black_box(x);
-  let _ = core::hint::black_box(y);
+  let _ = black_box(x);
+  let _ = black_box(y);
 
   let r: &mut Root = {
     let t = x.ptr + x.len; // tail
@@ -307,7 +307,7 @@ where
 }
 
 #[inline(always)]
-fn alloc_layout<'a, E>(x: &mut Allocator<'a>, y: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
+fn alloc_layout<'a, E>(x: &mut Arena<'a>, y: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
 where
   E: Fail
 {
@@ -320,7 +320,7 @@ where
 }
 
 #[inline(always)]
-fn alloc<'a, T, E>(x: &mut Allocator<'a>) -> Result<Slot<'a, T>, E>
+fn alloc<'a, T, E>(x: &mut Arena<'a>) -> Result<Slot<'a, T>, E>
 where
   E: Fail
 {
@@ -331,11 +331,11 @@ where
 }
 
 #[inline(always)]
-fn alloc_slice<'a, T, E>(x: &mut Allocator<'a>, y: usize) -> Result<Slot<'a, [T]>, E>
+fn alloc_slice<'a, T, E>(x: &mut Arena<'a>, y: usize) -> Result<Slot<'a, [T]>, E>
 where
   E: Fail
 {
-  if size_of::<T>() != 0 && y > MAX_CHUNK_SIZE / size_of::<T>() {
+  if size_of::<T>() != 0 && y > isize::MAX as usize / size_of::<T>() {
     return E::fail(ErrorInfo::AllocSizeTooLarge);
   }
 
@@ -347,7 +347,7 @@ where
 }
 
 #[inline(always)]
-fn copy_slice<'a, T, E>(x: &mut Allocator<'a>, y: &[T]) -> Result<&'a mut [T], E>
+fn copy_slice<'a, T, E>(x: &mut Arena<'a>, y: &[T]) -> Result<&'a mut [T], E>
 where
   T: Copy,
   E: Fail
@@ -360,7 +360,7 @@ where
 }
 
 #[inline(always)]
-fn copy_str<'a, E>(x: &mut Allocator<'a>, y: &str) -> Result<&'a mut str, E>
+fn copy_str<'a, E>(x: &mut Arena<'a>, y: &str) -> Result<&'a mut str, E>
 where
   E: Fail
 {
@@ -404,7 +404,7 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
 }
 */
 
-impl<'a> Allocator<'a> {
+impl<'a> Arena<'a> {
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
     unwrap(alloc_layout(self, layout))
@@ -462,9 +462,9 @@ impl<'a> Allocator<'a> {
   }
 }
 
-impl<'a> fmt::Debug for Allocator<'a> {
+impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_tuple("Allocator")
+    f.debug_tuple("Arena")
       .field(&self.0.ptr)
       .field(&self.0.len)
       .finish()
@@ -519,8 +519,8 @@ impl<'a, T> Slot<'a, [T]> {
     F: FnMut(usize) -> T
   {
     let mut f = f;
-    let x = ptr::from(self.0);
     let n = self.0.len();
+    let x = ptr::from(self.0);
 
     for i in 0 .. n {
       let y = x + size_of::<T>() * i;
@@ -545,7 +545,7 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub fn foo<'a>(a: &mut Allocator<'a>, n: usize) {
+pub fn foo<'a>(a: &mut Arena<'a>, n: usize) {
   // let mut a = a;
   let mut x = 1_u64;
 
@@ -556,26 +556,26 @@ pub fn foo<'a>(a: &mut Allocator<'a>, n: usize) {
   }
 }
 
-pub fn aaa0<'a>(a: &mut Allocator<'a>, x: u32) -> &'a mut u32 {
+pub fn aaa0<'a>(a: &mut Arena<'a>, x: u32) -> &'a mut u32 {
   a.alloc().init(x)
 }
 
-pub fn aaa1<'a>(a: &mut Allocator<'a>, x: u64) -> &'a mut u64 {
+pub fn aaa1<'a>(a: &mut Arena<'a>, x: u64) -> &'a mut u64 {
   a.alloc().init(x)
 }
 
-pub fn aaa2<'a>(a: &mut Allocator<'a>, x: u128) -> &'a mut u128 {
+pub fn aaa2<'a>(a: &mut Arena<'a>, x: u128) -> &'a mut u128 {
   a.alloc().init(x)
 }
 
 #[repr(align(32))]
 pub struct A(pub [u8; 65]);
 
-pub fn aaa3<'a>(a: &mut Allocator<'a>, x: A) -> &'a mut A {
+pub fn aaa3<'a>(a: &mut Arena<'a>, x: A) -> &'a mut A {
   a.alloc().init(x)
 }
 
-pub fn aaa4<'a>(a: &mut Allocator<'a>, n: usize) -> &'a mut [u64] {
+pub fn aaa4<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
   let mut x = 1_u64;
   a.alloc_slice(n).init_slice(|_| {
     let y = x;
@@ -585,6 +585,6 @@ pub fn aaa4<'a>(a: &mut Allocator<'a>, n: usize) -> &'a mut [u64] {
   })
 }
 
-pub fn aaa5<'a>(a: &mut Allocator<'a>, x: u64) -> Result<&'a mut u64, AllocError> {
+pub fn aaa5<'a>(a: &mut Arena<'a>, x: u64) -> Result<&'a mut u64, AllocError> {
   a.try_alloc().map(|s| s.init(x))
 }
