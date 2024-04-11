@@ -94,15 +94,6 @@ const WORD: usize = size_of::<usize>();
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-// SAFETY:
-//
-// - `x` must be `true`
-
-#[inline(always)]
-unsafe fn assume(x: bool) {
-  if ! x { unsafe { unreachable_unchecked() }; }
-}
-
 #[inline(always)]
 fn unwrap<T>(x: Result<T, Panicked>) -> T {
   match x {
@@ -120,8 +111,8 @@ fn unwrap<T>(x: Result<T, Panicked>) -> T {
 impl Fail for Panicked {
   #[inline(never)]
   #[cold]
-  fn fail<T>(x: Error) -> Result<T, Self> {
-    match x {
+  fn fail<T>(e: Error) -> Result<T, Self> {
+    match e {
       Error::AllocSizeTooLarge => panic!("oxcart: alloc size too large!"),
       Error::SystemAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
       Error::Unimplemented => panic!("oxcart: unimplemented!"),
@@ -166,6 +157,10 @@ impl Span {
 // Store
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+unsafe impl Send for Store { }
+
+unsafe impl Sync for Store { }
 
 fn chunk<E>(n: usize) -> Result<NonNull<u8>, E>
 where
@@ -249,47 +244,73 @@ impl fmt::Debug for Store {
 impl<'a> RefUnwindSafe for Arena<'a> { }
 
 #[inline(always)]
-unsafe fn alloc_fast<E>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>)
+unsafe fn alloc_fast<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8>, E>)
 where
   E: Fail
 {
-  let p = x.ptr;
-  let n = x.len;
-  let s = y.size();
-  let a = y.align();
+  let p = state.ptr;
+  let t = state.len;
+  let m = layout.align();
+  let n = layout.size();
 
-  unsafe { assume(p.addr() & WORD - 1 == 0) };
+  if p.addr() & WORD - 1 != 0 { unsafe { unreachable_unchecked() }; }
 
-  let i = - p & a - 1;                 // <= 0b0111...1
-  let j = WORD - 1 + s & ! (WORD - 1); // <= 0b1000...0
-  let k = i + j;
+  let a = ! (WORD - 1) & m - 1 & - p;
+  let b = a + (! (WORD - 1) & WORD - 1 + n);
 
-  if k > n  { return unsafe { alloc_slow(x, y) }; }
+  if b > t  { return unsafe { alloc_slow(state, layout) }; }
 
-  let u = Span::new(p + k, n - k);
-  let v = p + i;
-  let v = unsafe { v.as_non_null() };
+  let u = Span::new(p + b, t - b);
+  let v = unsafe { (p + a).as_non_null() };
 
   return (u, Ok(v));
 }
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow<E>(x: Span, y: Layout) -> (Span, Result<NonNull<u8>, E>)
+unsafe fn alloc_slow<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8>, E>)
 where
   E: Fail
 {
   // TODO
-  let _ = black_box(x);
-  let _ = black_box(y);
+  let _ = black_box(state);
+  let _ = black_box(layout);
 
-  let r: &mut Root = {
-    let t = x.ptr + x.len; // tail
-    let t = t.as_mut_ref::<Link>();
-    let r = t.root;
-    let r = if r.is_null() { ptr::from(t) } else { r };
-    r.as_mut_ref::<Root>()
+  let r: &mut Root = 'grow: {
+
+    let t = state.ptr + state.len; // tail
+    let t = unsafe { t.as_mut_ref::<Link>() };
+
+    if t.root.is_null() {
+      let r = ptr::from(t);
+      let r = unsafe { r.as_mut_ref::<Root>() };
+      break 'grow r;
+    }
+
+    let r = unsafe { t.root.as_mut_ref::<Root>() };
+
+    if r.is_growing {
+      break 'grow r;
+    }
+
+    // TODO: if the allocation can't fit in `t.next`, allocated a new chunk
+    // immediately, without searching further chunks
+
+    /*
+    let p = t.next.ptr;
+    let n = t.next.len;
+    let s = layout.size();
+    let a = layout.align();
+
+    let i = - p & a - 1;                 // <= 0b0111...1
+    let j = WORD - 1 + s & ! (WORD - 1); // <= 0b1000...0
+    let k = i + j;
+    */
+
+    return unsafe { alloc_fast(t.next, layout) };
   };
+
+  // compute the chunk size needed to guarantee we can fit the allocation.
 
   // let s = y.size();
   // let a = y.align();
@@ -306,6 +327,42 @@ where
     (Span::new(NULL, 0), Ok(NonNull::dangling()))
   }
 }
+
+/*
+#[inline(never)]
+#[cold]
+unsafe fn reserve(x: Span, n: usize) -> Span {
+  let l = ptr::as_ref::<Link>(x.tail());
+  let r = l.root;
+
+  if ! ptr::is_null(r) && ! ptr::as_ref::<Root>(r).is_growing {
+    return l.next;
+  }
+
+  let r =
+    if ! ptr::is_null(r) {
+      ptr::as_mut_ref::<Root>(r)
+    } else {
+      ptr::as_mut_ref::<Root>(l)
+    };
+
+  let c = alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD_SIZE));
+
+  if ptr::is_null(c) {
+    panic!("alloc::alloc failed!")
+  }
+
+  let _ = n;
+  let n = SLAB;
+  let c = Span { ptr: ptr::from_mut_ptr(c), len: n - size_of::<Link>() >> WORD_LOG2 };
+  let l = c.tail();
+  let b = r.link.next;
+  ptr::write::<Link>(l, Link { next: b, root: ptr::from_ref(r) });
+  r.link.next = c;
+  b
+}
+*/
+
 
 #[inline(always)]
 fn alloc_layout<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
@@ -372,41 +429,6 @@ where
   let x = unsafe { str::from_utf8_unchecked_mut(x) };
   Ok(x)
 }
-
-/*
-#[inline(never)]
-#[cold]
-unsafe fn reserve(x: Span, n: usize) -> Span {
-  let l = ptr::as_ref::<Link>(x.tail());
-  let r = l.root;
-
-  if ! ptr::is_null(r) && ! ptr::as_ref::<Root>(r).is_growing {
-    return l.next;
-  }
-
-  let r =
-    if ! ptr::is_null(r) {
-      ptr::as_mut_ref::<Root>(r)
-    } else {
-      ptr::as_mut_ref::<Root>(l)
-    };
-
-  let c = alloc::alloc(Layout::from_size_align_unchecked(SLAB, WORD_SIZE));
-
-  if ptr::is_null(c) {
-    panic!("alloc::alloc failed!")
-  }
-
-  let _ = n;
-  let n = SLAB;
-  let c = Span { ptr: ptr::from_mut_ptr(c), len: n - size_of::<Link>() >> WORD_LOG2 };
-  let l = c.tail();
-  let b = r.link.next;
-  ptr::write::<Link>(l, Link { next: b, root: ptr::from_ref(r) });
-  r.link.next = c;
-  b
-}
-*/
 
 impl<'a> Arena<'a> {
   #[inline(always)]
@@ -602,46 +624,14 @@ unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-pub fn foo<'a>(a: &mut Arena<'a>, n: usize) {
-  // let mut a = a;
-  let mut x = 1_u64;
-
-  for _ in 0 .. n {
-    let _: _ =  a.alloc().init(x);
-    x = x ^ x << 7;
-    x = x ^ x >> 9;
-  }
+pub fn foo<'a>(a: &mut Arena<'a>) -> &'a mut u64 {
+  a.alloc().init(1_u64)
 }
 
-pub fn aaa0<'a>(a: &mut Arena<'a>, x: u32) -> &'a mut u32 {
-  a.alloc().init(x)
+pub fn bar<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
+  a.alloc_slice(n).init_slice(|_| 1_u64)
 }
 
-pub fn aaa1<'a>(a: &mut Arena<'a>, x: u64) -> &'a mut u64 {
-  a.alloc().init(x)
-}
-
-pub fn aaa2<'a>(a: &mut Arena<'a>, x: u128) -> &'a mut u128 {
-  a.alloc().init(x)
-}
-
-#[repr(align(32))]
-pub struct A(pub [u8; 65]);
-
-pub fn aaa3<'a>(a: &mut Arena<'a>, x: A) -> &'a mut A {
-  a.alloc().init(x)
-}
-
-pub fn aaa4<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
-  let mut x = 1_u64;
-  a.alloc_slice(n).init_slice(|_| {
-    let y = x;
-    x = x ^ x << 7;
-    x = x ^ x >> 9;
-    y
-  })
-}
-
-pub fn aaa5<'a>(a: &mut Arena<'a>, x: u64) -> Result<&'a mut u64, AllocError> {
-  a.try_alloc().map(|s| s.init(x))
+pub fn baz<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
+  a.alloc_layout(layout)
 }
