@@ -7,6 +7,7 @@ use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
+use std::mem::offset_of;
 use std::mem::size_of;
 use std::panic::RefUnwindSafe;
 use std::ptr::NonNull;
@@ -29,6 +30,16 @@ where
 
 #[derive(Debug)]
 pub struct AllocError;
+
+unsafe impl Send for Store { }
+
+unsafe impl Sync for Store { }
+
+impl<'a> RefUnwindSafe for Arena<'a> { }
+
+unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
+
+unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 
 ////////////////////////////////////////////////////////////////////////////////
 //
@@ -84,7 +95,7 @@ trait Fail: Sized {
 ////////////////////////////////////////////////////////////////////////////////
 
 const DEFAULT_INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
-const MAX_CHUNK_SIZE: usize = isize::MAX as usize + 1 - WORD;
+const MAX_CHUNK_SIZE: usize = isize::MAX as usize - WORD + 1;
 const NULL: ptr = ptr::NULL;
 const WORD: usize = size_of::<usize>();
 
@@ -158,10 +169,6 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-unsafe impl Send for Store { }
-
-unsafe impl Sync for Store { }
-
 fn chunk<E>(n: usize) -> Result<NonNull<u8>, E>
 where
   E: Fail
@@ -190,7 +197,7 @@ where
 
   let x =
     Root {
-      link: Link { next: Span { ptr: p, len: k }, root: NULL, },
+      link: Link { next: Span { ptr: p, len: k }, root: r, },
       is_growing: false,
       total_allocated: n,
     };
@@ -241,29 +248,22 @@ impl fmt::Debug for Store {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<'a> RefUnwindSafe for Arena<'a> { }
-
 #[inline(always)]
 unsafe fn alloc_fast<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8>, E>)
 where
   E: Fail
 {
   let p = state.ptr;
-  let t = state.len;
-  let m = layout.align();
-  let n = layout.size();
+  let n = state.len;
 
   if p.addr() & WORD - 1 != 0 { unsafe { unreachable_unchecked() }; }
 
-  let a = ! (WORD - 1) & m - 1 & - p;
-  let b = a + (! (WORD - 1) & WORD - 1 + n);
+  let u = ! (WORD - 1) & layout.align() - 1 & - p;
+  let v = u + (! (WORD - 1) & WORD - 1 + layout.size());
 
-  if b > t  { return unsafe { alloc_slow(state, layout) }; }
+  if v > n  { return unsafe { alloc_slow(state, layout) }; }
 
-  let u = Span::new(p + b, t - b);
-  let v = unsafe { (p + a).as_non_null() };
-
-  return (u, Ok(v));
+  (Span::new(p + v, n - v), Ok(unsafe { (p + u).as_non_null() }))
 }
 
 #[inline(never)]
@@ -272,42 +272,35 @@ unsafe fn alloc_slow<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8
 where
   E: Fail
 {
-  // TODO
   let _ = black_box(state);
   let _ = black_box(layout);
 
-  let r: &mut Root = 'grow: {
+  let r: ptr;
 
-    let t = state.ptr + state.len; // tail
-    let t = unsafe { t.as_mut_ref::<Link>() };
+  'grow: {
+    let t = state.ptr + state.len;
+    let a = unsafe { t.read::<Link>() };
+    r = a.root;
+    let s = a.next;
 
-    if t.root.is_null() {
-      let r = ptr::from(t);
-      let r = unsafe { r.as_mut_ref::<Root>() };
-      break 'grow r;
+    if t == r {
+      break 'grow;
     }
 
-    let r = unsafe { t.root.as_mut_ref::<Root>() };
-
-    if r.is_growing {
-      break 'grow r;
+    if unsafe { (r + offset_of!(Root, is_growing)).read::<bool>() } {
+      break 'grow;
     }
 
-    // TODO: if the allocation can't fit in `t.next`, allocated a new chunk
-    // immediately, without searching further chunks
+    let p = s.ptr;
+    let n = s.len;
+    let a = ! (WORD - 1) & layout.align() - 1 & - p;
+    let b = a + (! (WORD - 1) & WORD - 1 + layout.size());
 
-    /*
-    let p = t.next.ptr;
-    let n = t.next.len;
-    let s = layout.size();
-    let a = layout.align();
+    if b > n {
+      break 'grow;
+    }
 
-    let i = - p & a - 1;                 // <= 0b0111...1
-    let j = WORD - 1 + s & ! (WORD - 1); // <= 0b1000...0
-    let k = i + j;
-    */
-
-    return unsafe { alloc_fast(t.next, layout) };
+    return (Span::new(p + b, n - b), Ok(unsafe { (p + a).as_non_null() }));
   };
 
   // compute the chunk size needed to guarantee we can fit the allocation.
@@ -315,11 +308,10 @@ where
   // let s = y.size();
   // let a = y.align();
   // let n = usize::max(a, WORD) - WORD + s;
-  let n = usize::max(r.link.next.len, r.total_allocated / 4 + 1);
-  let n = n.next_power_of_two();
+  //
+  // let n = usize::max(r.link.next.len, r.total_allocated / 4 + 1);
+  // let n = n.next_power_of_two();
   // next power of two
-
-  let _ = n;
 
   if black_box(true) {
     (Span::new(NULL, 0), E::fail(Error::Unimplemented))
@@ -362,7 +354,6 @@ unsafe fn reserve(x: Span, n: usize) -> Span {
   b
 }
 */
-
 
 #[inline(always)]
 fn alloc_layout<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
@@ -490,11 +481,8 @@ impl<'a> Arena<'a> {
 
 impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let x = self.0.get();
-    f.debug_tuple("Arena")
-      .field(&x.ptr)
-      .field(&x.len)
-      .finish()
+    let Span { ptr, len } = self.0.get();
+    f.debug_tuple("Arena").field(&ptr).field(&len).finish()
   }
 }
 
@@ -503,10 +491,6 @@ impl<'a> fmt::Debug for Arena<'a> {
 // Slot
 //
 ////////////////////////////////////////////////////////////////////////////////
-
-unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
-
-unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 
 impl<'a, T> Slot<'a, T> {
   #[inline(always)]
