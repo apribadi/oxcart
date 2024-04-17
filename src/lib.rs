@@ -1,13 +1,13 @@
 use std::alloc::Layout;
 use std::alloc;
 use std::cell::Cell;
+use std::cmp::max;
+use std::cmp::min;
 use std::fmt;
-use std::hint::black_box;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
-use std::mem::offset_of;
 use std::mem::size_of;
 use std::panic::RefUnwindSafe;
 use std::ptr::NonNull;
@@ -77,8 +77,8 @@ const _: () = assert!(size_of::<Link>() % WORD == 0 && align_of::<Link>() == WOR
 const _: () = assert!(size_of::<Root>() % WORD == 0 && align_of::<Root>() == WORD);
 
 enum Error {
-  AllocSizeTooLarge,
   SystemAllocatorFailed(Layout),
+  TooLarge,
   Unimplemented,
 }
 
@@ -94,16 +94,26 @@ trait Fail: Sized {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-const DEFAULT_INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
-const MAX_CHUNK_SIZE: usize = isize::MAX as usize - WORD + 1;
 const NULL: ptr = ptr::NULL;
-const WORD: usize = size_of::<usize>();
+const BITS: usize = usize::BITS as usize;
+const WORD: usize = size_of::<usize>();  // 0b00...001000
+const MASK: usize = WORD.wrapping_neg(); // 0b11...111000
+
+const INITIAL_CHUNK_SIZE: usize = 1 << 14; // 16384
+const MAX_CHUNK_SIZE: usize = 1 << BITS - 2;
+const MAX_ALLOC_SIZE: usize = 1 << BITS - 3;
+const MAX_ALIGN: usize = 1 << BITS - 4;
 
 ////////////////////////////////////////////////////////////////////////////////
 //
 // UTILITY FUNCTIONS
 //
 ////////////////////////////////////////////////////////////////////////////////
+
+#[inline(always)]
+fn clz(x: usize) -> usize {
+  x.leading_zeros() as usize
+}
 
 #[inline(always)]
 fn unwrap<T>(x: Result<T, Panicked>) -> T {
@@ -124,8 +134,8 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
-      Error::AllocSizeTooLarge => panic!("oxcart: alloc size too large!"),
       Error::SystemAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
+      Error::TooLarge => panic!("oxcart: attempted a too large allocation!"),
       Error::Unimplemented => panic!("oxcart: unimplemented!"),
     }
   }
@@ -161,6 +171,11 @@ impl Span {
   fn new(ptr: ptr, len: usize) -> Self {
     Self { ptr, len, }
   }
+
+  #[inline(always)]
+  fn tail(self) -> ptr {
+    self.ptr + self.len
+  }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -173,14 +188,15 @@ fn chunk<E>(n: usize) -> Result<NonNull<u8>, E>
 where
   E: Fail
 {
-  assert!(n > 0);
+  assert!(n >= 1);
   assert!(n <= MAX_CHUNK_SIZE);
+  assert!(n % WORD == 0);
 
-  let layout = Layout::from_size_align(n, WORD).unwrap();
-  let p = unsafe { alloc::alloc(layout) };
-  let p = NonNull::new(p);
-  let Some(p) = p else { return E::fail(Error::SystemAllocatorFailed(layout)); };
-  Ok(p)
+  let l = Layout::from_size_align(n, WORD).unwrap();
+  let x = unsafe { alloc::alloc(l) };
+  let x = NonNull::new(x);
+  let Some(x) = x else { return E::fail(Error::SystemAllocatorFailed(l)); };
+  Ok(x)
 }
 
 fn store<E>(n: usize) -> Result<Store, E>
@@ -188,32 +204,32 @@ where
   E: Fail
 {
   let m = size_of::<Root>();
-  let n = n.clamp(m, MAX_CHUNK_SIZE);
-  let k = n - m & ! (WORD - 1);
-  let n = k + m;
+  let n = min(max(m, n & MASK), MAX_CHUNK_SIZE);
+  let k = n - m;
   let p = chunk(n)?;
   let p = ptr::from(p);
   let r = p + k;
 
-  let x =
-    Root {
-      link: Link { next: Span { ptr: p, len: k }, root: r, },
-      is_growing: false,
-      total_allocated: n,
-    };
+  unsafe {
+    r.write(
+      Root {
+        link: Link { next: Span { ptr: p, len: k }, root: r, },
+        is_growing: false,
+        total_allocated: n,
+      }
+    )
+  };
 
-  unsafe { r.write(x) };
-  let r = unsafe { r.as_non_null() };
-  Ok(Store(r))
+  Ok(Store(unsafe { r.as_non_null() }))
 }
 
 impl Store {
   pub fn new() -> Self {
-    unwrap(store(DEFAULT_INITIAL_CHUNK_SIZE))
+    unwrap(store(INITIAL_CHUNK_SIZE))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(DEFAULT_INITIAL_CHUNK_SIZE)
+    store(INITIAL_CHUNK_SIZE)
   }
 
   pub fn arena(&mut self) -> Arena<'_> {
@@ -233,11 +249,12 @@ impl Drop for Store {
 
 impl fmt::Debug for Store {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let r = ptr::from(self.0);
-    let r = unsafe { r.as_ref::<Root>() };
-    let total_allocated = r.total_allocated;
+    let _ = self;
+    // let r = ptr::from(self.0);
+    // let r = unsafe { r.as_ref::<Root>() };
     f.debug_struct("Store")
-      .field("total_allocated", &total_allocated)
+      // .field("chunk_size_last", &r.chunk_size_last)
+      // .field("chunk_size_total", &r.chunk_size_total)
       .finish()
   }
 }
@@ -258,8 +275,8 @@ where
 
   if p.addr() & WORD - 1 != 0 { unsafe { unreachable_unchecked() }; }
 
-  let u = ! (WORD - 1) & layout.align() - 1 & - p;
-  let v = u + (! (WORD - 1) & WORD - 1 + layout.size());
+  let u = MASK & layout.align() - 1 & - p;
+  let v = u + (MASK & WORD - 1 + layout.size());
 
   if v > n  { return unsafe { alloc_slow(state, layout) }; }
 
@@ -272,52 +289,53 @@ unsafe fn alloc_slow<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8
 where
   E: Fail
 {
-  let _ = black_box(state);
-  let _ = black_box(layout);
-
-  let r: ptr;
+  let t = unsafe { state.tail().as_ref::<Link>() };
+  let r = unsafe { t.root.as_ref::<Root>() };
 
   'grow: {
-    let t = state.ptr + state.len;
-    let a = unsafe { t.read::<Link>() };
-    r = a.root;
-    let s = a.next;
+    if ptr::from(t) == ptr::from(r) || r.is_growing { break 'grow; }
 
-    if t == r {
-      break 'grow;
-    }
+    let p = t.next.ptr;
+    let n = t.next.len;
+    let u = MASK & layout.align() - 1 & - p;
+    let v = u + (MASK & WORD - 1 + layout.size());
 
-    if unsafe { (r + offset_of!(Root, is_growing)).read::<bool>() } {
-      break 'grow;
-    }
+    if v > n { break 'grow; }
 
-    let p = s.ptr;
-    let n = s.len;
-    let a = ! (WORD - 1) & layout.align() - 1 & - p;
-    let b = a + (! (WORD - 1) & WORD - 1 + layout.size());
-
-    if b > n {
-      break 'grow;
-    }
-
-    return (Span::new(p + b, n - b), Ok(unsafe { (p + a).as_non_null() }));
+    return (Span::new(p + v, n - v), Ok(unsafe { (p + u).as_non_null() }));
   };
 
-  // compute the chunk size needed to guarantee we can fit the allocation.
-
-  // let s = y.size();
-  // let a = y.align();
-  // let n = usize::max(a, WORD) - WORD + s;
-  //
-  // let n = usize::max(r.link.next.len, r.total_allocated / 4 + 1);
-  // let n = n.next_power_of_two();
-  // next power of two
-
-  if black_box(true) {
-    (Span::new(NULL, 0), E::fail(Error::Unimplemented))
-  } else {
-    (Span::new(NULL, 0), Ok(NonNull::dangling()))
+  if layout.size() > MAX_ALLOC_SIZE || layout.align() > MAX_ALIGN {
+    return (state, E::fail(Error::TooLarge));
   }
+
+  let a = (MASK & layout.align() - 1) + (MASK & WORD - 1 + layout.size()) + size_of::<Link>();
+  let b = r.total_allocated / 4 + 1;
+  let n = 1 << BITS - clz(max(a, b) - 1);
+
+  let p = chunk(n)?;
+  let p = ptr::from(p);
+  let m = size_of::<Link>();
+  let k = n - m;
+  let t = p + k;
+
+  unsafe {
+    t.write(
+      Link {
+        next: r.next,
+        root: ptr::from_ref(r),
+      }
+    )
+  };
+
+  r.link.next = Span::new(p, k);
+  r.is_growing = true;
+  r.total_allocated = r.total_allocated.saturating_add(n);
+
+  let u = MASK & layout.align() - 1 & - p;
+  let v = u + (MASK & WORD - 1 + layout.size());
+
+  return (Span::new(p + v, k - v), Ok(unsafe { (p + u).as_non_null() }));
 }
 
 /*
@@ -386,7 +404,7 @@ where
   E: Fail
 {
   if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
-    return E::fail(Error::AllocSizeTooLarge);
+    return E::fail(Error::TooLarge);
   }
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
