@@ -20,6 +20,8 @@ use pop::ptr;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
+pub use allocator_api2::alloc::AllocError;
+
 pub struct Store(NonNull<Root>);
 
 pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
@@ -27,9 +29,6 @@ pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
 pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
 where
   T: ?Sized;
-
-#[derive(Debug)]
-pub struct AllocError;
 
 unsafe impl Send for Store { }
 
@@ -154,12 +153,6 @@ impl Fail for AllocError {
   }
 }
 
-impl fmt::Display for AllocError {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.write_str("oxcart: failed to allocate memory!")
-  }
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 //
 // Span
@@ -266,7 +259,7 @@ impl fmt::Debug for Store {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-unsafe fn alloc_fast<E>(state: Span, layout: Layout) -> (Span, Result<NonNull<u8>, E>)
+unsafe fn alloc_fast<E>(state: Span, layout: Layout) -> Result<(Span, NonNull<u8>), E>
 where
   E: Fail
 {
@@ -278,9 +271,14 @@ where
   let u = MASK & layout.align() - 1 & - p;
   let v = u + (MASK & WORD - 1 + layout.size());
 
-  if v > n  { return unsafe { alloc_slow(state, layout) }; }
+  if v > n  {
+    return match unsafe { alloc_slow(state, layout) } {
+      (_, Err(e)) => Err(e),
+      (s, Ok(x)) => Ok((s, x)),
+    }
+  }
 
-  (Span::new(p + v, n - v), Ok(unsafe { (p + u).as_non_null() }))
+  Ok((Span::new(p + v, n - v), unsafe { (p + u).as_non_null() }))
 }
 
 #[inline(never)]
@@ -313,6 +311,7 @@ where
   let b = r.total_allocated / 4 + 1;
   let n = 1 << BITS - clz(max(a, b) - 1);
 
+  /*
   let p = chunk(n)?;
   let p = ptr::from(p);
   let m = size_of::<Link>();
@@ -336,6 +335,8 @@ where
   let v = u + (MASK & WORD - 1 + layout.size());
 
   return (Span::new(p + v, k - v), Ok(unsafe { (p + u).as_non_null() }));
+  */
+  unimplemented!()
 }
 
 /*
@@ -379,9 +380,8 @@ where
   E: Fail
 {
   let a = arena.0.get_mut();
-  let (s, x) = unsafe { alloc_fast(*a, layout) };
+  let (s, x) = unsafe { alloc_fast(*a, layout) }?;
   *a = s;
-  let x = x?;
   let x = ptr::from(x);
   let x = unsafe { x.as_slice_mut_ref(layout.size()) };
   Ok(x)
@@ -393,8 +393,7 @@ where
   E: Fail
 {
   let x = alloc_layout(arena, Layout::new::<T>())?;
-  let x = ptr::from(x);
-  let x = unsafe { x.as_non_null::<T>() };
+  let x = unsafe { ptr::from(x).as_non_null::<T>() };
   Ok(Slot(x, PhantomData))
 }
 
@@ -403,14 +402,13 @@ fn alloc_slice<'a, T, E>(arena: &mut Arena<'a>, len: usize) -> Result<Slot<'a, [
 where
   E: Fail
 {
-  if size_of::<T>() != 0 && len > isize::MAX as usize / size_of::<T>() {
+  if size_of::<T>() != 0 && len > MAX_ALLOC_SIZE / size_of::<T>() {
     return E::fail(Error::TooLarge);
   }
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
   let x = alloc_layout(arena, l)?;
-  let x = ptr::from(x);
-  let x = unsafe { x.as_slice_non_null(len) };
+  let x = unsafe { ptr::from(x).as_slice_non_null(len) };
   Ok(Slot(x, PhantomData))
 }
 
@@ -513,23 +511,20 @@ impl<'a> fmt::Debug for Arena<'a> {
 impl<'a, T> Slot<'a, T> {
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    let x = ptr::from(self.0);
-    unsafe { x.as_mut_ref() }
+    unsafe { ptr::from(self.0).as_mut_ref() }
   }
 
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
-    let x = ptr::from(self.0);
-    unsafe { x.write(value) }
-    unsafe { x.as_mut_ref() }
+    unsafe { ptr::from(self.0).write(value) }
+    unsafe { ptr::from(self.0).as_mut_ref() }
   }
 }
 
 impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    let x = ptr::from(self.0);
-    unsafe { x.as_mut_ref() }
+    unsafe { ptr::from(self.0).as_mut_ref() }
   }
 
   #[inline(always)]
@@ -560,8 +555,7 @@ impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     let n = self.0.len();
-    let x = ptr::from(self.0);
-    unsafe { x.as_slice_mut_ref(n) }
+    unsafe { ptr::from(self.0).as_slice_mut_ref(n) }
   }
 
   #[inline(always)]
@@ -592,7 +586,7 @@ impl<'a, T> Slot<'a, [T]> {
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_tuple("Slot")
-      .field(&ptr::from(&self.0))
+      .field(&ptr::from(self.0))
       .finish()
   }
 }
@@ -605,14 +599,12 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 
 unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
   #[inline(always)]
-  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, allocator_api2::alloc::AllocError> {
+  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
     let s = self.0.get();
-    let (s, x) = unsafe { alloc_fast::<AllocError>(s, layout) };
+    let (s, x) = unsafe { alloc_fast(s, layout) }?;
     self.0.set(s);
-    let Ok(x) = x else { return Err(allocator_api2::alloc::AllocError); };
     let n = layout.size();
-    let x = ptr::from(x);
-    let x = unsafe { x.as_slice_non_null(n) };
+    let x = unsafe { ptr::from(x).as_slice_non_null(n) };
     Ok(x)
   }
 
@@ -637,3 +629,8 @@ pub fn bar<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
 pub fn baz<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
   a.alloc_layout(layout)
 }
+
+pub fn qux<'a>(a: &mut Arena<'a>) -> Result<&'a mut u64, AllocError> {
+  a.try_alloc().map(|x| x.init(1_u64))
+}
+
