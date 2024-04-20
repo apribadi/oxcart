@@ -155,12 +155,12 @@ mod ptr {
   }
 
   #[inline(always)]
-  pub(crate) unsafe fn as_ref<'a, T>(x: NonNull<T>) -> &'a T {
+  pub(crate) unsafe fn as_ref<'a, T: ?Sized>(x: NonNull<T>) -> &'a T {
     &*x.as_ptr()
   }
 
   #[inline(always)]
-  pub(crate) unsafe fn as_mut_ref<'a, T>(x: NonNull<T>) -> &'a mut T {
+  pub(crate) unsafe fn as_mut_ref<'a, T: ?Sized>(x: NonNull<T>) -> &'a mut T {
     &mut *x.as_ptr()
   }
 
@@ -473,8 +473,7 @@ impl<'a> Arena<'a> {
 
 impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    let Span { tail, size } = self.0.get();
-    f.debug_tuple("Arena").field(&tail).field(&size).finish()
+    f.debug_tuple("Arena").field(&self.0.get().tail).field(&self.0.get().size).finish()
   }
 }
 
@@ -508,9 +507,9 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   where
     F: FnMut(usize) -> T
   {
-    let mut f = f;
-    let mut i = 0;
     let mut x = ptr::cast(self.0);
+    let mut i = 0;
+    let mut f = f;
 
     while i < N {
       unsafe { ptr::write(x, f(i)) };
@@ -522,12 +521,10 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   }
 }
 
-/*
 impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    let n = self.0.len();
-    unsafe { ptr::from_non_null(self.0).as_slice_mut_ref(n) }
+    unsafe { ptr::as_slice_mut_ref(ptr::cast(self.0), self.0.len()) }
   }
 
   #[inline(always)]
@@ -535,31 +532,23 @@ impl<'a, T> Slot<'a, [T]> {
   where
     F: FnMut(usize) -> T
   {
-    let n = self.0.len();
-    let x = ptr::from_non_null(self.0);
-    let mut f = f;
+    let mut x = ptr::cast(self.0);
     let mut i = 0;
-    let mut y = x;
+    let mut f = f;
 
-    while i < n {
-      unsafe { y.write(f(i)) };
+    while i < self.0.len() {
+      unsafe { ptr::write(x, f(i)) };
       i = i + 1;
-      y = y + size_of::<T>();
+      x = unsafe { ptr::add(x, 1) };
     }
 
-    // SAFETY:
-    //
-    // Every slice element has been initialized.
-
-    unsafe { x.as_slice_mut_ref(n) }
+    unsafe { ptr::as_mut_ref(self.0) }
   }
 }
 
 impl<'a, T> fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_tuple("Slot")
-      .field(&ptr::from_non_null(self.0))
-      .finish()
+    f.debug_tuple("Slot").field(&self.0).finish()
   }
 }
 
@@ -573,11 +562,9 @@ unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
   #[inline(always)]
   fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
     let s = self.0.get();
-    let (s, x) = unsafe { alloc_fast(s, layout) }?;
+    let s = unsafe { alloc_fast(s, layout) }?;
     self.0.set(s);
-    let n = layout.size();
-    let x = unsafe { ptr::from_non_null(x).as_slice_non_null(n) };
-    Ok(x)
+    Ok(ptr::as_slice(s.tail, layout.size()))
   }
 
   #[inline(always)]
@@ -609,4 +596,3 @@ pub fn qux<'a>(a: &mut Arena<'a>) -> Result<&'a mut u64, AllocError> {
 pub fn qqq<'a>(a: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
   a.try_alloc_layout(layout)
 }
-*/
