@@ -47,7 +47,7 @@ unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Eq, PartialEq)]
+#[derive(Clone, Copy, Eq, PartialEq)]
 enum Kind {
   NonRoot,
   Growing,
@@ -295,6 +295,12 @@ impl Drop for Store {
   fn drop(&mut self) {
     let _ = self;
     // TODO
+  }
+}
+
+impl fmt::Debug for Store {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    f.debug_tuple("Store").finish()
   }
 }
 
