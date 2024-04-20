@@ -1,6 +1,7 @@
 use expect_test::expect;
+use oxcart::Arena;
+use oxcart::Slot;
 use oxcart::Store;
-use pop::ptr;
 use std::alloc::Layout;
 
 #[test]
@@ -24,6 +25,36 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
+}
+
+#[test]
+fn test_special_traits() {
+  // fn is_clone<T: Clone>() {}
+  // fn is_copy<T: Copy>() {}
+  // fn is_eq<T: Eq>() {}
+  // fn is_hash<T: std::hash::Hash>() {}
+  // fn is_ord<T: Ord>() {}
+  // fn is_partial_eq<T: PartialEq>() {}
+  // fn is_partial_ord<T: PartialOrd>() {}
+  fn is_ref_unwind_safe<T: std::panic::RefUnwindSafe>() {}
+  fn is_send<T: Send>() {}
+  fn is_sync<T: Sync>() {}
+  // fn is_unpin<T: Unpin>() {}
+  fn is_unwind_safe<T: std::panic::UnwindSafe>() {}
+
+  is_ref_unwind_safe::<Store>();
+  is_send::<Store>();
+  is_sync::<Store>();
+  is_unwind_safe::<Store>();
+
+  is_send::<Arena<'static>>();
+  is_ref_unwind_safe::<Arena<'static>>();
+  is_unwind_safe::<Arena<'static>>();
+
+  is_ref_unwind_safe::<Slot<'static, u64>>();
+  is_send::<Slot<'static, u64>>();
+  is_sync::<Slot<'static, u64>>();
+  is_unwind_safe::<Slot<'static, u64>>();
 }
 
 #[test]
@@ -75,6 +106,7 @@ fn test_alloc_zero_sized() {
   let _ = arena.alloc_slice(5).init_slice(|_| ());
 }
 
+/*
 #[test]
 fn test_alloc_aligned() {
   let mut store = Store::new();
@@ -84,6 +116,7 @@ fn test_alloc_aligned() {
     assert!(ptr::from(p).addr() & (align - 1) == 0);
   }
 }
+*/
 
 /*
 #[test]

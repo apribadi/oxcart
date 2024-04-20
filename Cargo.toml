@@ -1,34 +1,28 @@
 [package]
 authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
 categories = ["memory-management", "rust-patterns"]
-description = "a fast arena allocator"
+description = "a high performance arena allocator"
 edition = "2021"
 license = "Artistic-2.0"
 name = "oxcart"
-version = "1.0.0"
+version = "0.1.0"
+
+[dependencies]
+allocator-api2 = "0.2.16"
+
+[dev-dependencies]
+bump-scope = "0.1.8"
+bumpalo = "3.16.0"
+expect-test = "1.5.0"
+
+[features]
+allocator_api = []
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
 non_ascii_idents = "warn"
-non_camel_case_types = "allow"
 trivial_numeric_casts = "warn"
 unreachable_pub = "warn"
 unused_lifetimes = "warn"
 unused_qualifications = "warn"
 unused_results = "warn"
-
-[dependencies]
-pop = { git = "https://github.com/apribadi/pop.git" }
-allocator-api2 = "0.2.16"
-
-[dev-dependencies]
-bumpalo = "3.12.0"
-copy_arena = "0.1.1"
-expect-test = "1.5.0"
-generational-arena = "0.2.8"
-slab = "0.4.7"
-slotmap = "1.0.6"
-typed-arena = "2.0.2"
-
-[features]
-allocator_api = []
