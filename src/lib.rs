@@ -1,8 +1,6 @@
 use std::alloc::Layout;
 use std::alloc;
 use std::cell::Cell;
-use std::cmp::max;
-use std::cmp::min;
 use std::fmt;
 use std::hint::unreachable_unchecked;
 use std::marker::PhantomData;
@@ -21,13 +19,11 @@ mod ptr;
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Store(NonNull<Header>);
+pub struct Store(NonNull<Node>);
 
 pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
 
-pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>)
-where
-  T: ?Sized;
+pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>) where T: ?Sized;
 
 pub use allocator_api2::alloc::AllocError;
 
@@ -49,26 +45,18 @@ unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum Kind {
-  NonRoot,
-  Growing,
-  Ready,
-}
-
 #[derive(Clone, Copy)]
 struct Span {
   tail: NonNull<u8>,
   size: usize,
 }
 
-struct Header {
+struct Node {
+  root: NonNull<Node>,
   next: Span,
-  root: NonNull<Header>,
-  kind: Kind,
+  flag: bool,
+  used: usize,
 }
-
-const _: () = assert!(size_of::<Header>() % WORD == 0 && align_of::<Header>() == WORD);
 
 enum Error {
   SystemAllocatorFailed(Layout),
@@ -88,11 +76,9 @@ trait Fail: Sized {
 ////////////////////////////////////////////////////////////////////////////////
 
 const BITS: usize = usize::BITS as usize;
-const WORD: usize = size_of::<usize>();  // 0b00...001000 (for 64-bit)
-const MASK: usize = WORD.wrapping_neg(); // 0b11...111000
+const WORD: usize = size_of::<usize>();
 
-const INITIAL_CHUNK: usize = 1 << 14; // 16384
-
+const FST_CHUNK: usize = 1 << 14; // 16384
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
 const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
@@ -104,7 +90,17 @@ const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-fn clz(x: usize) -> usize {
+const fn max(x: usize, y: usize) -> usize {
+  if x >= y { x } else { y }
+}
+
+#[inline(always)]
+const fn min(x: usize, y: usize) -> usize {
+  if x <= y { x } else { y }
+}
+
+#[inline(always)]
+const fn clz(x: usize) -> usize {
   x.leading_zeros() as usize
 }
 
@@ -165,52 +161,61 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn chunk<E>(n: usize) -> Result<NonNull<u8>, E>
+fn chunk<E>(n: usize) -> Result<NonNull<Node>, E>
 where
   E: Fail
 {
-  assert!(n >= 1);
-  assert!(n <= MAX_CHUNK);
-  assert!(n % WORD == 0);
+  debug_assert!(n >= size_of::<Node>());
+  debug_assert!(n <= MAX_CHUNK);
+  debug_assert!(n % WORD == 0);
 
-  let l = Layout::from_size_align(n, WORD).unwrap();
-  let x = unsafe { ptr::alloc(l) };
-  let Some(x) = x else { return E::fail(Error::SystemAllocatorFailed(l)); };
-  Ok(x)
+  let layout = Layout::from_size_align(n, max(WORD, align_of::<Node>())).unwrap();
+  let p = ptr::alloc(layout);
+  let Ok(p) = p else { return E::fail(Error::SystemAllocatorFailed(layout)); };
+  Ok(ptr::cast(p))
 }
 
 fn store<E>(n: usize) -> Result<Store, E>
 where
   E: Fail
 {
-  let n = min(max(n & MASK, size_of::<Header>()), MAX_CHUNK);
-  let a = chunk(n)?;
+  let n = min(! (WORD - 1) & WORD - 1 + max(n, size_of::<Node>()), MAX_CHUNK);
+  let p = chunk(n)?;
+  let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
 
-  unsafe {
-    ptr::write(
-      ptr::cast(a),
-      Header {
-        next: Span { tail: ptr::add(a, n), size: n - size_of::<Header>() },
-        root: ptr::cast(a),
-        kind: Kind::Ready,
-      }
-    )
+  let node = Node {
+    root: p,
+    next: Span { tail: t, size: n - size_of::<Node>() },
+    flag: false,
+    used: n,
   };
 
-  Ok(Store(ptr::cast(a)))
+  unsafe { ptr::write(p, node) };
+
+  Ok(Store(p))
 }
 
 impl Store {
   pub fn new() -> Self {
-    unwrap(store(INITIAL_CHUNK))
+    unwrap(store(FST_CHUNK))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(INITIAL_CHUNK)
+    store(FST_CHUNK)
+  }
+
+  pub fn with_capacity(capacity: usize) -> Self {
+    unwrap(store(capacity))
+  }
+
+  pub fn try_with_capacity(capacity: usize) -> Result<Self, AllocError> {
+    store(capacity)
   }
 
   pub fn arena(&mut self) -> Arena<'_> {
-    Arena(Cell::new(unsafe { ptr::as_mut_ref(self.0) }.next), PhantomData)
+    let r = unsafe { ptr::as_mut_ref(self.0) };
+    r.flag = false;
+    Arena(Cell::new(r.next), PhantomData)
   }
 }
 
@@ -256,11 +261,13 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> Result<Span, E>
 where
   E: Fail
 {
-  let a: &Header = ptr::as_ref(ptr::cast(ptr::sub(span.tail, span.size + size_of::<Header>())));
-  let b: &Header = ptr::as_ref(a.root);
+  let r: &Node;
 
   'grow: {
-    if ptr::from_ref(a) == ptr::from_ref(b) || a.kind == Kind::Growing { break 'grow; }
+    let a: &Node = ptr::as_ref(ptr::cast(ptr::sub(span.tail, span.size + size_of::<Node>())));
+    r = ptr::as_ref(a.root);
+
+    if ptr::from_ref(a) == ptr::from_ref(r) || r.flag { break 'grow; }
 
     let m =
       layout.size() + (
@@ -272,7 +279,8 @@ where
     return Ok(Span::new(ptr::sub(a.next.tail, m), n));
   }
 
-  /*
+  let r: &mut Node = ptr::as_mut_ref(ptr::from_ref(r));
+
   if layout.size() > MAX_ALLOC || layout.align() > MAX_ALIGN {
     return E::fail(Error::TooLarge);
   }
@@ -280,23 +288,46 @@ where
   let n =
     1 << BITS - clz(
       max(
-        r.total_allocated / 4 + 1,
-        size_of::<Link>()
-          + (MASK & layout.align() - 1)
-          + (MASK & WORD - 1 + layout.size())
+        max(
+          r.next.size + size_of::<Node>(),
+          r.used / 4 + 1,
+        ),
+        size_of::<Node>()
+          + (! (WORD - 1) & layout.align() - 1)
+          + (! (WORD - 1) & WORD - 1 + layout.size())
       ) - 1
     );
-  */
 
-  if std::hint::black_box(true) {
-    std::hint::black_box(E::fail(Error::TooLarge))
-  } else {
-    std::hint::black_box(E::fail(Error::TooLarge))
-  }
+  let p = chunk(n)?;
+  let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
+
+  let node = Node {
+    root: ptr::from_ref(r),
+    next: r.next,
+    flag: /* dummy */ false,
+    used: /* dummy */ 0,
+  };
+
+  unsafe { ptr::write(p, node) };
+
+  let span = Span { tail: t, size: n - size_of::<Node>() };
+
+  let m =
+    layout.size() + (
+      (WORD - 1 | layout.align() - 1) &
+        ptr::addr(span.tail).wrapping_sub(layout.size()));
+
+  debug_assert!(m <= span.size);
+
+  r.next = span;
+  r.flag = true;
+  r.used = r.used.saturating_add(n);
+
+  Ok(Span::new(ptr::sub(span.tail, m), span.size - m))
 }
 
 #[inline(always)]
-fn alloc_internal<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<NonNull<u8>, E>
+fn alloc_impl<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<NonNull<u8>, E>
 where
   E: Fail
 {
@@ -311,7 +342,7 @@ fn alloc<'a, T, E>(arena: &mut Arena<'a>) -> Result<Slot<'a, T>, E>
 where
   E: Fail
 {
-  let x = alloc_internal(arena, Layout::new::<T>())?;
+  let x = alloc_impl(arena, Layout::new::<T>())?;
   Ok(Slot(ptr::cast(x), PhantomData))
 }
 
@@ -324,8 +355,8 @@ where
     return E::fail(Error::TooLarge);
   }
 
-  let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = alloc_internal(arena, l)?;
+  let layout = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
+  let x = alloc_impl(arena, layout)?;
   Ok(Slot(ptr::as_slice(ptr::cast(x), len), PhantomData))
 }
 
@@ -335,9 +366,12 @@ where
   T: Copy,
   E: Fail
 {
-  let x = alloc_internal(arena, Layout::for_value(src))?;
-  unsafe { ptr::copy_nonoverlapping::<T>(ptr::cast(ptr::from_ref(src)), ptr::cast(x), src.len()) };
-  Ok(unsafe { ptr::as_slice_mut_ref(ptr::cast(x), src.len()) })
+  let x = alloc_impl(arena, Layout::for_value(src))?;
+  let x = ptr::cast(x);
+  let y = ptr::cast(ptr::from_ref(src));
+  let n = src.len();
+  unsafe { ptr::copy_nonoverlapping::<T>(y, x, n) };
+  Ok(unsafe { ptr::as_slice_mut_ref(x, n) })
 }
 
 #[inline(always)]
@@ -354,7 +388,7 @@ fn alloc_layout<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<&'a mut 
 where
   E: Fail
 {
-  let x = alloc_internal(arena, layout)?;
+  let x = alloc_impl(arena, layout)?;
   Ok(unsafe { ptr::as_slice_mut_ref(ptr::cast(x), layout.size()) })
 }
 
@@ -530,6 +564,16 @@ pub fn example_try_alloc_init<'a>(a: &mut Arena<'a>) -> Result<&'a mut u64, Allo
   a.try_alloc().map(|x| x.init(1_u64))
 }
 
+pub fn example_alloc_slice<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
+  let mut i = 0_u64;
+  a.alloc_slice(n).init_slice(|_| { i = i.wrapping_mul(5).wrapping_add(1); i })
+}
+
+pub fn example_try_alloc_slice<'a>(a: &mut Arena<'a>, n: usize) -> Result<&'a mut [u64], AllocError> {
+  let mut i = 0_u64;
+  a.try_alloc_slice(n).map(|x| x.init_slice(|_| { i = i.wrapping_mul(5).wrapping_add(1); i }))
+}
+
 pub fn example_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
   a.alloc_layout(layout)
 }
@@ -537,8 +581,3 @@ pub fn example_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [M
 pub fn example_try_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
   a.try_alloc_layout(layout)
 }
-
-pub fn example_alloc_slice<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
-  a.alloc_slice(n).init_slice(|i| (i as u64).swap_bytes())
-}
-

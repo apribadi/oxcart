@@ -1,8 +1,12 @@
 use std::alloc::Layout;
 use std::ptr::NonNull;
+use allocator_api2::alloc::AllocError;
 
 #[inline(always)]
-pub(crate) unsafe fn from_ref<T: ?Sized>(x: &T) -> NonNull<T> {
+pub(crate) fn from_ref<T>(x: &T) -> NonNull<T>
+where
+  T: ?Sized
+{
   NonNull::from(x)
 }
 
@@ -25,7 +29,10 @@ pub(crate) fn is_aligned_to<T>(x: NonNull<T>, y: usize) -> bool {
 }
 
 #[inline(always)]
-pub(crate) const fn cast<T: ?Sized, U>(x: NonNull<T>) -> NonNull<U> {
+pub(crate) const fn cast<T, U>(x: NonNull<T>) -> NonNull<U>
+where
+  T: ?Sized
+{
   x.cast()
 }
 
@@ -51,12 +58,18 @@ pub(crate) fn as_slice<T>(x: NonNull<T>, y: usize) -> NonNull<[T]> {
 }
 
 #[inline(always)]
-pub(crate) unsafe fn as_ref<'a, T: ?Sized>(x: NonNull<T>) -> &'a T {
+pub(crate) unsafe fn as_ref<'a, T>(x: NonNull<T>) -> &'a T
+where
+  T: ?Sized
+{
   &*x.as_ptr()
 }
 
 #[inline(always)]
-pub(crate) unsafe fn as_mut_ref<'a, T: ?Sized>(x: NonNull<T>) -> &'a mut T {
+pub(crate) unsafe fn as_mut_ref<'a, T>(x: NonNull<T>) -> &'a mut T
+where
+  T: ?Sized
+{
   &mut *x.as_ptr()
 }
 
@@ -71,6 +84,13 @@ pub(crate) unsafe fn copy_nonoverlapping<T>(src: NonNull<T>, dst: NonNull<T>, le
 }
 
 #[inline(always)]
-pub(crate) unsafe fn alloc(layout: Layout) -> Option<NonNull<u8>> {
-  NonNull::new(std::alloc::alloc(layout))
+pub(crate) fn alloc(layout: Layout) -> Result<NonNull<u8>, AllocError> {
+  if layout.size() == 0 {
+    return Err(AllocError);
+  }
+
+  match NonNull::new(unsafe { std::alloc::alloc(layout) }) {
+    None => Err(AllocError),
+    Some(p) => Ok(p)
+  }
 }
