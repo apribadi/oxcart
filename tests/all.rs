@@ -106,6 +106,28 @@ fn test_alloc_zero_sized() {
   let _ = arena.alloc_slice(5).init_slice(|_| ());
 }
 
+#[test]
+fn test_growth() {
+  let mut store = Store::with_capacity(0);
+  let mut arena = store.arena();
+  let _ = arena.alloc().init(1_u8);
+  let _ = arena.alloc().init(1_u16);
+  let _ = arena.alloc().init(1_u32);
+  let _ = arena.alloc().init(1_u64);
+  let _ = arena.alloc().init(1_u128);
+  let _ = arena.alloc().init(1_f32);
+  let _ = arena.alloc().init(1_f64);
+  let _ = arena.alloc().init(());
+  let _ = arena.alloc().init(true);
+  let _ = arena.alloc().init((1_u8, 1_u128));
+  let _ = arena.alloc().init([1_u8; 0]);
+  let _ = arena.alloc().init([1_u8; 1]);
+  let _ = arena.alloc().init([1_u8; 3]);
+  let _ = arena.alloc().init([1_u8; 5]);
+  let _ = arena.alloc().init([1_u8; 7]);
+  let _ = arena.alloc().init([1_u8; 9]);
+}
+
 /*
 #[test]
 fn test_alloc_aligned() {
@@ -139,18 +161,21 @@ fn test_linked_list() {
     cdr: Option<&'a Node<'a, T>>
   }
 
-  let mut store = Store::new();
-  let mut arena = store.arena();
-  let mut x: Option<&Node<'_, u64>> = None;
-  for i in 0 .. 10 {
-    x = Some(arena.alloc().init(Node { car: i, cdr: x }));
+  let mut store = Store::with_capacity(50);
+
+  for _ in 0 .. 3 {
+    let mut arena = store.arena();
+    let mut x: Option<&Node<'_, u64>> = None;
+    for i in 0 .. 100 {
+      x = Some(arena.alloc().init(Node { car: i, cdr: x }));
+    }
+    let mut y = 0;
+    while let Some(z) = x {
+      y = y + z.car;
+      x = z.cdr;
+    }
+    expect!["4950"].assert_eq(&format!("{:?}", y));
   }
-  let mut y = 0;
-  while let Some(z) = x {
-    y = y + z.car;
-    x = z.cdr;
-  }
-  expect!["45"].assert_eq(&format!("{:?}", y));
 }
 
 /*

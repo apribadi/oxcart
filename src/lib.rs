@@ -59,7 +59,7 @@ struct Node {
 }
 
 enum Error {
-  SystemAllocatorFailed(Layout),
+  GlobalAllocatorFailed(Layout),
   TooLarge,
 }
 
@@ -78,7 +78,7 @@ trait Fail: Sized {
 const BITS: usize = usize::BITS as usize;
 const WORD: usize = size_of::<usize>();
 
-const FST_CHUNK: usize = 1 << 14; // 16384
+const INIT_SIZE: usize = 1 << 14; // 16384
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
 const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
@@ -123,7 +123,7 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
-      Error::SystemAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
+      Error::GlobalAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
       Error::TooLarge => panic!("oxcart: attempted a too large allocation!"),
     }
   }
@@ -171,7 +171,7 @@ where
 
   let layout = Layout::from_size_align(n, max(WORD, align_of::<Node>())).unwrap();
   let p = ptr::alloc(layout);
-  let Ok(p) = p else { return E::fail(Error::SystemAllocatorFailed(layout)); };
+  let Ok(p) = p else { return E::fail(Error::GlobalAllocatorFailed(layout)); };
   Ok(ptr::cast(p))
 }
 
@@ -197,11 +197,11 @@ where
 
 impl Store {
   pub fn new() -> Self {
-    unwrap(store(FST_CHUNK))
+    unwrap(store(INIT_SIZE))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(FST_CHUNK)
+    store(INIT_SIZE)
   }
 
   pub fn with_capacity(capacity: usize) -> Self {
@@ -228,6 +228,7 @@ impl Drop for Store {
 
 impl fmt::Debug for Store {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    // TODO: chunk sizes
     f.debug_tuple("Store").finish()
   }
 }
@@ -261,11 +262,10 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> Result<Span, E>
 where
   E: Fail
 {
-  let r: &Node;
+  let a: &Node = ptr::as_ref(ptr::cast(ptr::sub(span.tail, span.size + size_of::<Node>())));
+  let r: &Node = ptr::as_ref(a.root);
 
   'grow: {
-    let a: &Node = ptr::as_ref(ptr::cast(ptr::sub(span.tail, span.size + size_of::<Node>())));
-    r = ptr::as_ref(a.root);
 
     if ptr::from_ref(a) == ptr::from_ref(r) || r.flag { break 'grow; }
 
@@ -278,8 +278,6 @@ where
 
     return Ok(Span::new(ptr::sub(a.next.tail, m), n));
   }
-
-  let r: &mut Node = ptr::as_mut_ref(ptr::from_ref(r));
 
   if layout.size() > MAX_ALLOC || layout.align() > MAX_ALIGN {
     return E::fail(Error::TooLarge);
@@ -302,7 +300,7 @@ where
   let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
 
   let node = Node {
-    root: ptr::from_ref(r),
+    root: a.root,
     next: r.next,
     flag: /* dummy */ false,
     used: /* dummy */ 0,
@@ -318,6 +316,8 @@ where
         ptr::addr(span.tail).wrapping_sub(layout.size()));
 
   debug_assert!(m <= span.size);
+
+  let r: &mut Node = ptr::as_mut_ref(a.root);
 
   r.next = span;
   r.flag = true;
