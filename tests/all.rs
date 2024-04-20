@@ -1,17 +1,18 @@
-use expect_test::expect;
+use std::alloc::Layout;
+use std::mem::size_of;
 use oxcart::Arena;
 use oxcart::Slot;
 use oxcart::Store;
-use std::alloc::Layout;
+use expect_test::expect;
 
 #[test]
 fn test_api() {
   let mut store = Store::new();
   let _ = Store::try_new();
+  let _ = Store::with_capacity(0);
+  let _ = Store::try_with_capacity(0);
   let _ = format!("{:?}", store);
   let mut arena = store.arena();
-  let _ = arena.alloc_layout(Layout::new::<u64>());
-  let _ = arena.try_alloc_layout(Layout::new::<u64>());
   let _ = arena.alloc::<u64>();
   let _ = arena.try_alloc::<u64>();
   let _ = arena.alloc_slice::<u64>(3);
@@ -20,8 +21,13 @@ fn test_api() {
   let _ = arena.try_copy_slice::<u64>(&[0, 1, 2]);
   let _ = arena.copy_str("hello");
   let _ = arena.try_copy_str("hello");
+  let _ = arena.alloc_layout(Layout::new::<u64>());
+  let _ = arena.try_alloc_layout(Layout::new::<u64>());
+  let _ = arena.alloc::<u64>().as_uninit();
   let _ = arena.alloc::<u64>().init(13);
+  let _ = arena.alloc::<[u64; 3]>().as_uninit_array();
   let _ = arena.alloc::<[u64; 3]>().init_array(|i| i as u64);
+  let _ = arena.alloc_slice::<u64>(3).as_uninit_slice();
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
@@ -178,18 +184,16 @@ fn test_linked_list() {
   }
 }
 
-/*
 #[test]
 fn test_too_big_allocation() {
-  let too_big_nbytes = (isize::MAX as usize + 1) - (3 * size_of::<usize>());
-  let too_big_nwords = too_big_nbytes / size_of::<usize>();
+  let too_big_nbytes = isize::MAX as usize - 1;
   let too_big_layout = Layout::from_size_align(too_big_nbytes, 1).unwrap();
-  let mut arena = Store::new();
-  let mut arena_ref = &mut arena;
-  assert!(arena_ref.try_alloc_slice::<usize>(too_big_nwords).is_err());
-  assert!(arena_ref.try_alloc_layout(too_big_layout).is_err());
+  let too_big_nwords = too_big_nbytes / size_of::<usize>();
+  let mut store = Store::new();
+  let mut arena = store.arena();
+  assert!(arena.try_alloc_layout(too_big_layout).is_err());
+  assert!(arena.try_alloc_slice::<usize>(too_big_nwords).is_err());
 }
-*/
 
 #[test]
 fn test_demo() {
@@ -208,7 +212,7 @@ fn test_demo() {
 
   let mut arena = store.arena();
 
-  // let _ = arena.alloc::<[u64; 100000]>(); // TODO
+  let _ = arena.alloc::<[u64; 100_000]>();
   let _ = arena.alloc::<[u64; 0]>();
   let _ = arena.alloc::<[u64; 1]>();
 

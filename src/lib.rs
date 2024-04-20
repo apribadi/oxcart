@@ -55,6 +55,7 @@ struct Node {
   root: NonNull<Node>,
   next: Span,
   flag: bool,
+  zero: bool,
   used: usize,
 }
 
@@ -78,7 +79,7 @@ trait Fail: Sized {
 const BITS: usize = usize::BITS as usize;
 const WORD: usize = size_of::<usize>();
 
-const INIT_SIZE: usize = 1 << 14; // 16384
+const INIT_SIZE: usize = 1 << 16; // 65536
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
 const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
@@ -161,7 +162,7 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn chunk<E>(n: usize) -> Result<NonNull<Node>, E>
+fn chunk<E>(n: usize, z: bool) -> Result<NonNull<Node>, E>
 where
   E: Fail
 {
@@ -170,23 +171,24 @@ where
   debug_assert!(n % WORD == 0);
 
   let layout = Layout::from_size_align(n, max(WORD, align_of::<Node>())).unwrap();
-  let p = ptr::alloc(layout);
+  let p = if z { ptr::alloc_zeroed(layout) } else { ptr::alloc(layout) };
   let Ok(p) = p else { return E::fail(Error::GlobalAllocatorFailed(layout)); };
   Ok(ptr::cast(p))
 }
 
-fn store<E>(n: usize) -> Result<Store, E>
+fn store<E>(n: usize, z: bool) -> Result<Store, E>
 where
   E: Fail
 {
   let n = min(! (WORD - 1) & WORD - 1 + max(n, size_of::<Node>()), MAX_CHUNK);
-  let p = chunk(n)?;
+  let p = chunk(n, z)?;
   let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
 
   let node = Node {
     root: p,
     next: Span { tail: t, size: n - size_of::<Node>() },
     flag: false,
+    zero: z,
     used: n,
   };
 
@@ -197,19 +199,19 @@ where
 
 impl Store {
   pub fn new() -> Self {
-    unwrap(store(INIT_SIZE))
+    unwrap(store(INIT_SIZE, false))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(INIT_SIZE)
+    store(INIT_SIZE, false)
   }
 
   pub fn with_capacity(capacity: usize) -> Self {
-    unwrap(store(capacity))
+    unwrap(store(capacity, false))
   }
 
   pub fn try_with_capacity(capacity: usize) -> Result<Self, AllocError> {
-    store(capacity)
+    store(capacity, false)
   }
 
   pub fn arena(&mut self) -> Arena<'_> {
@@ -228,7 +230,7 @@ impl Drop for Store {
 
 impl fmt::Debug for Store {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    // TODO: chunk sizes
+    // TODO: chunk list
     f.debug_tuple("Store").finish()
   }
 }
@@ -244,7 +246,7 @@ unsafe fn alloc_fast<E>(span: Span, layout: Layout) -> Result<Span, E>
 where
   E: Fail
 {
-  if ! ptr::is_aligned_to(span.tail, WORD) { unsafe { unreachable_unchecked() }; }
+  if ! ptr::is_aligned_to(span.tail, WORD) { unreachable_unchecked(); }
 
   let m =
     layout.size() + (
@@ -266,7 +268,6 @@ where
   let r: &Node = ptr::as_ref(a.root);
 
   'grow: {
-
     if ptr::from_ref(a) == ptr::from_ref(r) || r.flag { break 'grow; }
 
     let m =
@@ -279,7 +280,9 @@ where
     return Ok(Span::new(ptr::sub(a.next.tail, m), n));
   }
 
-  if layout.size() > MAX_ALLOC || layout.align() > MAX_ALIGN {
+  let r: &mut Node = ptr::as_mut_ref(r.root);
+
+  if ! (layout.size() <= MAX_ALLOC && layout.align() <= MAX_ALIGN) {
     return E::fail(Error::TooLarge);
   }
 
@@ -296,17 +299,18 @@ where
       ) - 1
     );
 
-  let p = chunk(n)?;
-  let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
+  let p = chunk(n, r.zero)?;
+  let t = ptr::add(ptr::cast::<_, u8>(p), n);
 
   let node = Node {
-    root: a.root,
+    root: r.root,
     next: r.next,
     flag: /* dummy */ false,
+    zero: /* dummy */ false,
     used: /* dummy */ 0,
   };
 
-  unsafe { ptr::write(p, node) };
+  ptr::write(p, node);
 
   let span = Span { tail: t, size: n - size_of::<Node>() };
 
@@ -316,8 +320,6 @@ where
         ptr::addr(span.tail).wrapping_sub(layout.size()));
 
   debug_assert!(m <= span.size);
-
-  let r: &mut Node = ptr::as_mut_ref(a.root);
 
   r.next = span;
   r.flag = true;
@@ -351,7 +353,7 @@ fn alloc_slice<'a, T, E>(arena: &mut Arena<'a>, len: usize) -> Result<Slot<'a, [
 where
   E: Fail
 {
-  if size_of::<T>() != 0 && len > MAX_ALLOC / size_of::<T>() {
+  if ! (size_of::<T>() == 0 || len <= MAX_ALLOC / size_of::<T>()) {
     return E::fail(Error::TooLarge);
   }
 
@@ -496,7 +498,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       x = unsafe { ptr::add(x, 1) };
     }
 
-    unsafe { ptr::as_mut_ref(ptr::cast(self.0)) }
+    unsafe { ptr::as_mut_ref(self.0) }
   }
 }
 
