@@ -52,8 +52,8 @@ struct Span {
 }
 
 struct Node {
-  root: NonNull<Node>,
   next: Span,
+  root: NonNull<Node>,
   flag: bool,
   zero: bool,
   used: usize,
@@ -185,8 +185,8 @@ where
   let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
 
   let node = Node {
+    next: Span::new(t, n - size_of::<Node>()),
     root: p,
-    next: Span { tail: t, size: n - size_of::<Node>() },
     flag: false,
     zero: z,
     used: n,
@@ -303,8 +303,8 @@ where
   let t = ptr::add(ptr::cast::<_, u8>(p), n);
 
   let node = Node {
-    root: r.root,
     next: r.next,
+    root: r.root,
     flag: /* dummy */ false,
     zero: /* dummy */ false,
     used: /* dummy */ 0,
@@ -312,7 +312,7 @@ where
 
   ptr::write(p, node);
 
-  let span = Span { tail: t, size: n - size_of::<Node>() };
+  let span = Span::new(t, n - size_of::<Node>());
 
   let m =
     layout.size() + (
@@ -582,4 +582,23 @@ pub fn example_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [M
 
 pub fn example_try_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
   a.try_alloc_layout(layout)
+}
+
+pub fn example_loop_mut_ref_alloc_init<'a>(a: &mut Arena<'a>, x: &mut [Option<&'a mut u64>]) {
+  for i in 0 .. x.len() {
+    x[i] = Some(a.alloc().init(1_u64));
+  }
+}
+
+pub fn example_loop_value_alloc_init<'a>(a: Arena<'a>, x: &mut [Option<&'a mut u64>]) {
+  let mut a = a;
+  for i in 0 .. x.len() {
+    x[i] = Some(a.alloc().init(1_u64))
+  }
+}
+
+pub fn example_loop_mut_ref_try_alloc_init<'a>(a: &mut Arena<'a>, x: &mut [Option<&'a mut u64>]) {
+  for i in 0 .. x.len() {
+    x[i] = match a.try_alloc() { Err(_) => None, Ok(x) => Some(x.init(1_u64)) };
+  }
 }
