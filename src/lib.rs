@@ -33,9 +33,9 @@ unsafe impl Send for Store { }
 
 unsafe impl Sync for Store { }
 
-unsafe impl<'a> Send for Arena<'a> { }
-
 impl<'a> RefUnwindSafe for Arena<'a> { }
+
+unsafe impl<'a> Send for Arena<'a> { }
 
 unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
 
@@ -110,7 +110,7 @@ const fn clz(x: usize) -> usize {
 
 #[inline(always)]
 fn unwrap<T>(x: Result<T, Panicked>) -> T {
-  match x { Err(e) => match e { }, Ok(x) =>  x}
+  match x { Err(e) => match e { }, Ok(x) => x }
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -124,8 +124,10 @@ impl Fail for Panicked {
   #[cold]
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
-      Error::GlobalAllocatorFailed(layout) => alloc::handle_alloc_error(layout),
-      Error::TooLarge => panic!("oxcart: attempted a too large allocation!"),
+      Error::GlobalAllocatorFailed(layout) =>
+        alloc::handle_alloc_error(layout),
+      Error::TooLarge =>
+        panic!("oxcart: attempted a too large allocation!"),
     }
   }
 }
@@ -171,9 +173,12 @@ where
   debug_assert!(n % WORD == 0);
 
   let layout = Layout::from_size_align(n, CHUNK_ALIGN).unwrap();
-  let p = ptr::alloc(layout);
-  let Ok(p) = p else { return E::fail(Error::GlobalAllocatorFailed(layout)); };
-  Ok(p)
+
+  let Ok(x) = ptr::alloc(layout) else {
+    return E::fail(Error::GlobalAllocatorFailed(layout));
+  };
+
+  Ok(x)
 }
 
 fn store<E>(n: usize) -> Result<Store, E>
@@ -237,7 +242,6 @@ impl Drop for Store {
 
 impl fmt::Debug for Store {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    // TODO: chunk list
     f.debug_tuple("Store").finish()
   }
 }
@@ -260,7 +264,9 @@ where
       (WORD - 1 | layout.align() - 1) &
         ptr::addr(span.tail).wrapping_sub(layout.size()));
 
-  let Some(n) = span.size.checked_sub(m) else { return alloc_slow(span, layout); };
+  let Some(n) = span.size.checked_sub(m) else {
+    return alloc_slow(span, layout);
+  };
 
   Ok(Span::new(ptr::sub(span.tail, m), n))
 }
@@ -275,14 +281,18 @@ where
   let r: &Node = ptr::as_ref(a.root);
 
   'grow: {
-    if ptr::from_ref(a) == ptr::from_ref(r) || r.flag { break 'grow; }
+    if ptr::from_ref(a) == ptr::from_ref(r) || r.flag {
+      break 'grow;
+    }
 
     let m =
       layout.size() + (
         (WORD - 1 | layout.align() - 1) &
           ptr::addr(a.next.tail).wrapping_sub(layout.size()));
 
-    let Some(n) = a.next.size.checked_sub(m) else { break 'grow; };
+    let Some(n) = a.next.size.checked_sub(m) else {
+      break 'grow;
+    };
 
     return Ok(Span::new(ptr::sub(a.next.tail, m), n));
   }
@@ -461,7 +471,10 @@ impl<'a> Arena<'a> {
 
 impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-    f.debug_tuple("Arena").field(&self.0.get().tail).field(&self.0.get().size).finish()
+    f.debug_tuple("Arena")
+      .field(&self.0.get().tail)
+      .field(&self.0.get().size)
+      .finish()
   }
 }
 
