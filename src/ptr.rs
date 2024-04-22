@@ -94,15 +94,3 @@ pub(crate) fn alloc(layout: Layout) -> Result<NonNull<u8>, AllocError> {
     Some(p) => Ok(p)
   }
 }
-
-#[inline(always)]
-pub(crate) fn alloc_zeroed(layout: Layout) -> Result<NonNull<u8>, AllocError> {
-  if layout.size() == 0 {
-    return Err(AllocError);
-  }
-
-  match NonNull::new(unsafe { std::alloc::alloc_zeroed(layout) }) {
-    None => Err(AllocError),
-    Some(p) => Ok(p)
-  }
-}

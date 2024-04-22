@@ -1,3 +1,5 @@
+#![doc = include_str!("../README.md")]
+
 use std::alloc::Layout;
 use std::alloc;
 use std::cell::Cell;
@@ -55,7 +57,6 @@ struct Node {
   next: Span,
   root: NonNull<Node>,
   flag: bool,
-  zero: bool,
   used: usize,
 }
 
@@ -78,6 +79,8 @@ trait Fail: Sized {
 
 const BITS: usize = usize::BITS as usize;
 const WORD: usize = size_of::<usize>();
+
+const CHUNK_ALIGN: usize = max(WORD, align_of::<Node>());
 
 const INIT_SIZE: usize = 1 << 16; // 65536
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
@@ -107,10 +110,7 @@ const fn clz(x: usize) -> usize {
 
 #[inline(always)]
 fn unwrap<T>(x: Result<T, Panicked>) -> T {
-  match x {
-    Ok(x) => x,
-    Err(e) => match e { }
-  }
+  match x { Err(e) => match e { }, Ok(x) =>  x}
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -162,7 +162,7 @@ impl Span {
 //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn chunk<E>(n: usize, z: bool) -> Result<NonNull<Node>, E>
+fn chunk<E>(n: usize) -> Result<NonNull<Node>, E>
 where
   E: Fail
 {
@@ -170,25 +170,24 @@ where
   debug_assert!(n <= MAX_CHUNK);
   debug_assert!(n % WORD == 0);
 
-  let layout = Layout::from_size_align(n, max(WORD, align_of::<Node>())).unwrap();
-  let p = if z { ptr::alloc_zeroed(layout) } else { ptr::alloc(layout) };
+  let layout = Layout::from_size_align(n, CHUNK_ALIGN).unwrap();
+  let p = ptr::alloc(layout);
   let Ok(p) = p else { return E::fail(Error::GlobalAllocatorFailed(layout)); };
   Ok(ptr::cast(p))
 }
 
-fn store<E>(n: usize, z: bool) -> Result<Store, E>
+fn store<E>(n: usize) -> Result<Store, E>
 where
   E: Fail
 {
   let n = min(! (WORD - 1) & WORD - 1 + max(n, size_of::<Node>()), MAX_CHUNK);
-  let p = chunk(n, z)?;
+  let p = chunk(n)?;
   let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
 
   let node = Node {
     next: Span::new(t, n - size_of::<Node>()),
     root: p,
     flag: false,
-    zero: z,
     used: n,
   };
 
@@ -199,19 +198,19 @@ where
 
 impl Store {
   pub fn new() -> Self {
-    unwrap(store(INIT_SIZE, false))
+    unwrap(store(INIT_SIZE))
   }
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(INIT_SIZE, false)
+    store(INIT_SIZE)
   }
 
   pub fn with_capacity(capacity: usize) -> Self {
-    unwrap(store(capacity, false))
+    unwrap(store(capacity))
   }
 
   pub fn try_with_capacity(capacity: usize) -> Result<Self, AllocError> {
-    store(capacity, false)
+    store(capacity)
   }
 
   pub fn arena(&mut self) -> Arena<'_> {
@@ -223,8 +222,14 @@ impl Store {
 
 impl Drop for Store {
   fn drop(&mut self) {
-    let _ = self;
-    // TODO
+    /*
+    let root = self.0;
+    let mut p = root;
+    let mut s = unsafe { ptr::as_ref(p) }.next;
+
+    loop {
+    }
+    */
   }
 }
 
@@ -299,14 +304,13 @@ where
       ) - 1
     );
 
-  let p = chunk(n, r.zero)?;
+  let p = chunk(n)?;
   let t = ptr::add(ptr::cast::<_, u8>(p), n);
 
   let node = Node {
     next: r.next,
     root: r.root,
     flag: /* dummy */ false,
-    zero: /* dummy */ false,
     used: /* dummy */ 0,
   };
 
@@ -334,7 +338,8 @@ where
   E: Fail
 {
   let a = arena.0.get_mut();
-  let s = unsafe { alloc_fast(*a, layout) }?;
+  let s = *a;
+  let s = unsafe { alloc_fast(s, layout) }?;
   *a = s;
   Ok(s.tail)
 }
@@ -557,6 +562,15 @@ unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
+
+pub fn foo<'a>(a: &mut Arena<'a>) -> [&'a mut u64; 4] {
+  [
+    a.alloc().init(1_u64),
+    a.alloc().init(1_u64),
+    a.alloc().init(1_u64),
+    a.alloc().init(1_u64),
+  ]
+}
 
 pub fn example_alloc_init<'a>(a: &mut Arena<'a>) -> &'a mut u64 {
   a.alloc().init(1_u64)
