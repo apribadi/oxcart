@@ -5,20 +5,18 @@ objects and then deallocate all of them at once.
 
 ## Example
 
-```rust
+```
 use oxcart::Arena;
-use oxcart::ArenaRef;
+use oxcart::Store;
 
-let mut arena = Arena::new();
-let mut arena_ref = &mut arena;
+let mut store = Store::new();
+let mut arena = store.arena();
 
-let x: &mut u64 = arena_ref.alloc().init(13);
-let y: &mut [u64] = arena_ref.alloc_slice(5).init_slice(|i| i as u64);
+let x: &mut u64 = arena.alloc().init(1_u64);
+let y: &mut [u64] = arena.alloc_slice(3).init_slice(|i| i as u64);
 
-assert!(*x == 13);
-assert!(y == &[0, 1, 2, 3, 4]);
-
-arena.reset();
+assert!(*x == 1);
+assert!(y == &[0, 1, 2]);
 ```
 
 ## Features

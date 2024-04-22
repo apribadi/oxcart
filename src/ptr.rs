@@ -20,7 +20,7 @@ pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // Once the `strict_provenance` feature has been stabilized, this should
   // use the `addr` method on the primitive pointer type.
 
-  unsafe { core::mem::transmute::<*mut T, usize>(x.as_ptr()) }
+  unsafe { std::mem::transmute::<*mut T, usize>(x.as_ptr()) }
 }
 
 #[inline(always)]
@@ -84,13 +84,19 @@ pub(crate) unsafe fn copy_nonoverlapping<T>(src: NonNull<T>, dst: NonNull<T>, le
 }
 
 #[inline(always)]
-pub(crate) fn alloc(layout: Layout) -> Result<NonNull<u8>, AllocError> {
+pub(crate) fn alloc<T>(layout: Layout) -> Result<NonNull<T>, AllocError> {
   if layout.size() == 0 {
     return Err(AllocError);
   }
 
-  match NonNull::new(unsafe { std::alloc::alloc(layout) }) {
-    None => Err(AllocError),
-    Some(p) => Ok(p)
-  }
+  let Some(p) = NonNull::new(unsafe { std::alloc::alloc(layout) }) else {
+    return Err(AllocError);
+  };
+
+  Ok(cast(p))
+}
+
+#[inline(always)]
+pub(crate) unsafe fn dealloc<T>(x: NonNull<T>, layout: Layout) {
+  std::alloc::dealloc(cast(x).as_ptr(), layout)
 }

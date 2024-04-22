@@ -16,9 +16,9 @@ use std::str;
 mod ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// PUBLIC TYPE AND TRAIT DEFINITIONS
-//
+//                                                                            //
+// PUBLIC TYPE AND TRAIT DEFINITIONS                                          //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 pub struct Store(NonNull<Node>);
@@ -42,9 +42,9 @@ unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
 unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// PRIVATE TYPE AND TRAIT DEFINITIONS
-//
+//                                                                            //
+// PRIVATE TYPE AND TRAIT DEFINITIONS                                         //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 #[derive(Clone, Copy)]
@@ -72,9 +72,9 @@ trait Fail: Sized {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// CONSTANTS
-//
+//                                                                            //
+// CONSTANTS                                                                  //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 const BITS: usize = usize::BITS as usize;
@@ -88,9 +88,9 @@ const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// UTILITY FUNCTIONS
-//
+//                                                                            //
+// UTILITY FUNCTIONS                                                          //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
@@ -114,9 +114,9 @@ fn unwrap<T>(x: Result<T, Panicked>) -> T {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Panicked
-//
+//                                                                            //
+// Panicked                                                                   //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 impl Fail for Panicked {
@@ -131,9 +131,9 @@ impl Fail for Panicked {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// AllocError
-//
+//                                                                            //
+// AllocError                                                                 //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 impl Fail for AllocError {
@@ -144,9 +144,9 @@ impl Fail for AllocError {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Span
-//
+//                                                                            //
+// Span                                                                       //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 impl Span {
@@ -157,9 +157,9 @@ impl Span {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Store
-//
+//                                                                            //
+// Store                                                                      //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 fn chunk<E>(n: usize) -> Result<NonNull<Node>, E>
@@ -173,7 +173,7 @@ where
   let layout = Layout::from_size_align(n, CHUNK_ALIGN).unwrap();
   let p = ptr::alloc(layout);
   let Ok(p) = p else { return E::fail(Error::GlobalAllocatorFailed(layout)); };
-  Ok(ptr::cast(p))
+  Ok(p)
 }
 
 fn store<E>(n: usize) -> Result<Store, E>
@@ -222,14 +222,16 @@ impl Store {
 
 impl Drop for Store {
   fn drop(&mut self) {
-    /*
     let root = self.0;
-    let mut p = root;
-    let mut s = unsafe { ptr::as_ref(p) }.next;
+    let mut span = unsafe { ptr::as_ref(self.0) }.next;
 
     loop {
+      let n = span.size + size_of::<Node>();
+      let p = ptr::cast::<_, Node>(unsafe { ptr::sub(span.tail, n) });
+      span = unsafe { ptr::as_ref(p) }.next;
+      unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, CHUNK_ALIGN)) };
+      if p == root { break; }
     }
-    */
   }
 }
 
@@ -241,9 +243,9 @@ impl fmt::Debug for Store {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Arena
-//
+//                                                                            //
+// Arena                                                                      //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
@@ -464,9 +466,9 @@ impl<'a> fmt::Debug for Arena<'a> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Slot
-//
+//                                                                            //
+// Slot                                                                       //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 impl<'a, T> Slot<'a, T> {
@@ -539,9 +541,9 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 }
 
 ////////////////////////////////////////////////////////////////////////////////
-//
-// Allocator API
-//
+//                                                                            //
+// Allocator API                                                              //
+//                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
 unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
