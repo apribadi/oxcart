@@ -86,9 +86,9 @@ fn go_c_1<'a>(arena: &'a bumpalo::Bump, len: &[usize; INNER], buf: &mut [Option<
 }
 
 #[inline(never)]
-fn go_c_2<'a>(arena: &'a bumpalo::Bump, lay: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_c_2<'a>(arena: &'a bumpalo::Bump, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
   for i in 0 .. INNER {
-    let layout = lay[i];
+    let layout = layout[i];
     let p = arena.alloc_layout(layout).as_ptr().cast();
     let p = unsafe { &*std::ptr::slice_from_raw_parts(p, layout.size()) };
     buf[i] = Some(p);
@@ -98,21 +98,21 @@ fn go_c_2<'a>(arena: &'a bumpalo::Bump, lay: &[Layout; INNER], buf: &mut [Option
 #[inline(never)]
 fn go_d_0<'a>(arena: &'a bump_scope::Bump, buf: &mut [Option<&'a MaybeUninit<u64>>; INNER]) {
   for i in 0 .. INNER {
-    buf[i] = Some(arena.alloc(MaybeUninit::uninit()).into_mut());
+    buf[i] = Some(arena.alloc_uninit().into_mut());
   }
 }
 
 #[inline(never)]
 fn go_d_1<'a>(arena: &'a bump_scope::Bump, len: &[usize; INNER], buf: &mut [Option<&'a [MaybeUninit<u64>]>; INNER]) {
   for i in 0 .. INNER {
-    buf[i] = Some(arena.alloc_slice_fill(len[i], MaybeUninit::uninit()).into_mut());
+    buf[i] = Some(arena.alloc_uninit_slice(len[i]).into_mut());
   }
 }
 
 #[inline(never)]
-fn go_d_2<'a>(arena: &'a bump_scope::Bump, lay: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_d_2<'a>(arena: &'a bump_scope::Bump, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
   for i in 0 .. INNER {
-    let layout = lay[i];
+    let layout = layout[i];
     let p = arena.alloc_layout(layout).as_ptr().cast();
     let p = unsafe { &*std::ptr::slice_from_raw_parts(p, layout.size()) };
     buf[i] = Some(p);
@@ -167,7 +167,7 @@ fn main() {
   timeit("C.1", || { arena.reset(); go_c_1(&arena, len, &mut [None; INNER]); });
   timeit("C.2", || { arena.reset(); go_c_2(&arena, layout, &mut [None; INNER]); });
 
-  let mut arena = bump_scope::Bump::with_capacity(Layout::new::<[u8; 1 << 16]>());
+  let mut arena = bump_scope::Bump::with_size(1 << 16);
   timeit("D.0", || { arena.reset(); go_d_0(&arena, &mut [None; INNER]); });
   timeit("D.1", || { arena.reset(); go_d_1(&arena, len, &mut [None; INNER]); });
   timeit("D.2", || { arena.reset(); go_d_2(&arena, layout, &mut [None; INNER]); });

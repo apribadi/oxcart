@@ -1,7 +1,6 @@
 #![doc = include_str!("../README.md")]
 
 use std::alloc::Layout;
-use std::alloc;
 use std::cell::Cell;
 use std::fmt;
 use std::hint::unreachable_unchecked;
@@ -9,9 +8,7 @@ use std::marker::PhantomData;
 use std::mem::MaybeUninit;
 use std::mem::align_of;
 use std::mem::size_of;
-use std::panic::RefUnwindSafe;
 use std::ptr::NonNull;
-use std::str;
 
 mod ptr;
 
@@ -33,7 +30,7 @@ unsafe impl Send for Store { }
 
 unsafe impl Sync for Store { }
 
-impl<'a> RefUnwindSafe for Arena<'a> { }
+impl<'a> std::panic::RefUnwindSafe for Arena<'a> { }
 
 unsafe impl<'a> Send for Arena<'a> { }
 
@@ -126,7 +123,7 @@ impl Fail for Panicked {
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
       Error::GlobalAllocatorFailed(layout) =>
-        alloc::handle_alloc_error(layout),
+        std::alloc::handle_alloc_error(layout),
       Error::TooLarge =>
         panic!("oxcart: attempted a too large allocation!"),
     }
@@ -394,7 +391,7 @@ where
   E: Fail
 {
   let x = copy_slice(arena, src.as_bytes())?;
-  Ok(unsafe { str::from_utf8_unchecked_mut(x) })
+  Ok(unsafe { std::str::from_utf8_unchecked_mut(x) })
 }
 
 #[inline(always)]
