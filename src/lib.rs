@@ -65,9 +65,10 @@ enum Error {
   TooLarge,
 }
 
+#[derive(Clone, Copy)]
 enum Panicked { }
 
-trait Fail: Sized {
+trait Fail: Copy + Sized {
   fn fail<T>(_: Error) -> Result<T, Self>;
 }
 
@@ -265,7 +266,7 @@ where
         ptr::addr(span.tail).wrapping_sub(layout.size()));
 
   let Some(n) = span.size.checked_sub(m) else {
-    return alloc_slow(span, layout);
+    return alloc_slow(span, layout)[0];
   };
 
   Ok(Span::new(ptr::sub(span.tail, m), n))
@@ -273,7 +274,7 @@ where
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> Result<Span, E>
+unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
 where
   E: Fail
 {
@@ -294,13 +295,13 @@ where
       break 'grow;
     };
 
-    return Ok(Span::new(ptr::sub(a.next.tail, m), n));
+    return [Ok(Span::new(ptr::sub(a.next.tail, m), n))];
   }
 
   let r: &mut Node = ptr::as_mut_ref(r.root);
 
   if ! (layout.size() <= MAX_ALLOC && layout.align() <= MAX_ALIGN) {
-    return E::fail(Error::TooLarge);
+    return [E::fail(Error::TooLarge)];
   }
 
   let n =
@@ -316,7 +317,7 @@ where
       ) - 1
     );
 
-  let p = chunk(n)?;
+  let p = match chunk(n) { Err(e) => return [Err(e)], Ok(p) => p };
   let t = ptr::add(ptr::cast::<_, u8>(p), n);
 
   let node = Node {
@@ -341,7 +342,7 @@ where
   r.flag = true;
   r.used = r.used.saturating_add(n);
 
-  Ok(Span::new(ptr::sub(span.tail, m), span.size - m))
+  [Ok(Span::new(ptr::sub(span.tail, m), span.size - m))]
 }
 
 #[inline(always)]
