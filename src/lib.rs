@@ -1,16 +1,21 @@
 #![doc = include_str!("../README.md")]
+#![no_std]
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
-use std::alloc::Layout;
-use std::cell::Cell;
-use std::fmt;
-use std::hint::unreachable_unchecked;
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
-use std::mem::align_of;
-use std::mem::size_of;
-use std::ptr::NonNull;
+extern crate alloc;
 
 mod ptr;
+
+use alloc::alloc::Layout;
+use core::cell::Cell;
+use core::fmt;
+use core::hint::unreachable_unchecked;
+use core::marker::PhantomData;
+use core::mem::MaybeUninit;
+use core::mem::align_of;
+use core::mem::needs_drop;
+use core::mem::size_of;
+use core::ptr::NonNull;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -18,21 +23,33 @@ mod ptr;
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub struct Store(NonNull<Node>);
-
-pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
-
-pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>) where T: ?Sized;
-
+#[doc(no_inline)]
 pub use allocator_api2::alloc::AllocError;
+
+/// TODO: writeme
+///
+
+pub struct Store(NonNull<Node>);
 
 unsafe impl Send for Store { }
 
 unsafe impl Sync for Store { }
 
-impl<'a> std::panic::RefUnwindSafe for Arena<'a> { }
+/// TODO: writeme
+///
+
+pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
+
+impl<'a> core::panic::RefUnwindSafe for Arena<'a> { }
 
 unsafe impl<'a> Send for Arena<'a> { }
+
+/// Uninitialized memory with lifetime `'a` which can hold a `T`.
+///
+/// Typically you will initialize a slot with [`init`](Self::init) or
+/// [`init_slice`](Self::init_slice).
+
+pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>) where T: ?Sized;
 
 unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
 
@@ -123,9 +140,9 @@ impl Fail for Panicked {
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
       Error::GlobalAllocatorFailed(layout) =>
-        std::alloc::handle_alloc_error(layout),
+        alloc::alloc::handle_alloc_error(layout),
       Error::TooLarge =>
-        panic!("oxcart: attempted a too large allocation!"),
+        panic!("oxcart: attempted an allocation that is too large!"),
     }
   }
 }
@@ -194,9 +211,21 @@ where
 }
 
 impl Store {
+  /// Allocates a new store with a default capacity.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
   pub fn new() -> Self {
     unwrap(store(INIT_SIZE))
   }
+
+  /// Allocates a new store with a default capacity.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
 
   pub fn try_new() -> Result<Self, AllocError> {
     store(INIT_SIZE)
@@ -209,6 +238,9 @@ impl Store {
   pub fn try_with_capacity(capacity: usize) -> Result<Self, AllocError> {
     store(capacity)
   }
+
+  /// TODO: writeme
+  ///
 
   pub fn arena(&mut self) -> Arena<'_> {
     let r = unsafe { ptr::as_mut_ref(self.0) };
@@ -391,7 +423,7 @@ where
   E: Fail
 {
   let x = copy_slice(arena, src.as_bytes())?;
-  Ok(unsafe { std::str::from_utf8_unchecked_mut(x) })
+  Ok(unsafe { core::str::from_utf8_unchecked_mut(x) })
 }
 
 #[inline(always)]
@@ -404,25 +436,55 @@ where
 }
 
 impl<'a> Arena<'a> {
+  /// Allocates memory for a single object.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     unwrap(alloc(self))
   }
+
+  /// Allocates memory for a single object.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
   pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
     alloc(self)
   }
 
+  /// Allocates memory for a slice of the given length.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
     unwrap(alloc_slice(self, len))
   }
 
+  /// Allocates memory for a slice of the given length.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
   #[inline(always)]
   pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
     alloc_slice(self, len)
   }
+
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
 
   #[inline(always)]
   pub fn copy_slice<T>(&mut self, src: &[T]) -> &'a mut [T]
@@ -432,6 +494,12 @@ impl<'a> Arena<'a> {
     unwrap(copy_slice(self, src))
   }
 
+  /// Copies the slice into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
+
   #[inline(always)]
   pub fn try_copy_slice<T>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError>
   where
@@ -440,20 +508,44 @@ impl<'a> Arena<'a> {
     copy_slice(self, src)
   }
 
+  /// Copies the string into a new allocation.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
     unwrap(copy_str(self, src))
   }
+
+  /// Copies the string into a new allocation.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
   pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
     copy_str(self, src)
   }
 
+  /// Allocates memory for the given layout.
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
     unwrap(alloc_layout(self, layout))
   }
+
+  /// Allocates memory for the given layout.
+  ///
+  /// # Errors
+  ///
+  /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
   pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
@@ -477,29 +569,50 @@ impl<'a> fmt::Debug for Arena<'a> {
 ////////////////////////////////////////////////////////////////////////////////
 
 impl<'a, T> Slot<'a, T> {
+  /// Converts the slot into a reference to an uninitialized value.
+
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
     unsafe { ptr::as_mut_ref(ptr::cast(self.0)) }
   }
 
+  /// Initializes the slot with the given value.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
+
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
+    assert!(! needs_drop::<T>());
+
     unsafe { ptr::write(self.0, value) };
     unsafe { ptr::as_mut_ref(self.0) }
   }
 }
 
 impl<'a, T, const N: usize> Slot<'a, [T; N]> {
+  /// Converts the slot into a reference to an array of uninitialized values.
+
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
     unsafe { ptr::as_mut_ref(ptr::cast(self.0)) }
   }
+
+  /// Initializes the array with values produced by calling the given function
+  /// with each index in order.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
 
   #[inline(always)]
   pub fn init_array<F>(self, f: F) -> &'a mut [T; N]
   where
     F: FnMut(usize) -> T
   {
+    assert!(! needs_drop::<T>());
+
     let mut x = ptr::cast(self.0);
     let mut i = 0;
     let mut f = f;
@@ -515,16 +628,34 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 }
 
 impl<'a, T> Slot<'a, [T]> {
+  /// The length of the uninitialized slice.
+
+  #[inline(always)]
+  pub fn len(&self) -> usize {
+    self.0.len()
+  }
+
+  /// Converts the slot into a reference to a slice of uninitialized values.
+
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
     unsafe { ptr::as_slice_mut_ref(ptr::cast(self.0), self.0.len()) }
   }
+
+  /// Initializes the slice with values produced by calling the given function
+  /// with each index in order.
+  ///
+  /// # Panics
+  ///
+  /// Panics if `T` implements [`Drop`].
 
   #[inline(always)]
   pub fn init_slice<F>(self, f: F) -> &'a mut [T]
   where
     F: FnMut(usize) -> T
   {
+    assert!(! needs_drop::<T>());
+
     let mut x = ptr::cast(self.0);
     let mut i = 0;
     let mut f = f;
@@ -565,61 +696,5 @@ unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
     let _ = self;
     let _ = ptr;
     let _ = layout;
-  }
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-pub fn foo<'a>(a: &mut Arena<'a>) -> [&'a mut u64; 4] {
-  [
-    a.alloc().init(1_u64),
-    a.alloc().init(1_u64),
-    a.alloc().init(1_u64),
-    a.alloc().init(1_u64),
-  ]
-}
-
-pub fn example_alloc_init<'a>(a: &mut Arena<'a>) -> &'a mut u64 {
-  a.alloc().init(1_u64)
-}
-
-pub fn example_try_alloc_init<'a>(a: &mut Arena<'a>) -> Result<&'a mut u64, AllocError> {
-  a.try_alloc().map(|x| x.init(1_u64))
-}
-
-pub fn example_alloc_slice<'a>(a: &mut Arena<'a>, n: usize) -> &'a mut [u64] {
-  let mut i = 0_u64;
-  a.alloc_slice(n).init_slice(|_| { i = i.wrapping_mul(5).wrapping_add(1); i })
-}
-
-pub fn example_try_alloc_slice<'a>(a: &mut Arena<'a>, n: usize) -> Result<&'a mut [u64], AllocError> {
-  let mut i = 0_u64;
-  a.try_alloc_slice(n).map(|x| x.init_slice(|_| { i = i.wrapping_mul(5).wrapping_add(1); i }))
-}
-
-pub fn example_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
-  a.alloc_layout(layout)
-}
-
-pub fn example_try_alloc_layout<'a>(a: &mut Arena<'a>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
-  a.try_alloc_layout(layout)
-}
-
-pub fn example_loop_mut_ref_alloc_init<'a>(a: &mut Arena<'a>, x: &mut [Option<&'a mut u64>]) {
-  for i in 0 .. x.len() {
-    x[i] = Some(a.alloc().init(1_u64));
-  }
-}
-
-pub fn example_loop_value_alloc_init<'a>(a: Arena<'a>, x: &mut [Option<&'a mut u64>]) {
-  let mut a = a;
-  for i in 0 .. x.len() {
-    x[i] = Some(a.alloc().init(1_u64))
-  }
-}
-
-pub fn example_loop_mut_ref_try_alloc_init<'a>(a: &mut Arena<'a>, x: &mut [Option<&'a mut u64>]) {
-  for i in 0 .. x.len() {
-    x[i] = match a.try_alloc() { Err(_) => None, Ok(x) => Some(x.init(1_u64)) };
   }
 }

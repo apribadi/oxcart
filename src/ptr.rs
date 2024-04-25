@@ -1,5 +1,5 @@
-use std::alloc::Layout;
-use std::ptr::NonNull;
+use alloc::alloc::Layout;
+use core::ptr::NonNull;
 use allocator_api2::alloc::AllocError;
 
 #[inline(always)]
@@ -20,7 +20,7 @@ pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // Once the `strict_provenance` feature has been stabilized, this should
   // use the `addr` method on the primitive pointer type.
 
-  unsafe { std::mem::transmute::<*mut T, usize>(x.as_ptr()) }
+  unsafe { core::mem::transmute::<*mut T, usize>(x.as_ptr()) }
 }
 
 #[inline(always)]
@@ -53,7 +53,7 @@ pub(crate) unsafe fn write<T>(x: NonNull<T>, y: T) {
 
 #[inline(always)]
 pub(crate) fn as_slice<T>(x: NonNull<T>, y: usize) -> NonNull<[T]> {
-  let x = std::ptr::slice_from_raw_parts_mut(x.as_ptr(), y);
+  let x = core::ptr::slice_from_raw_parts_mut(x.as_ptr(), y);
   unsafe { NonNull::new_unchecked(x) }
 }
 
@@ -75,12 +75,12 @@ where
 
 #[inline(always)]
 pub(crate) unsafe fn as_slice_mut_ref<'a, T>(x: NonNull<T>, y: usize) -> &'a mut [T] {
-  &mut *std::ptr::slice_from_raw_parts_mut(x.as_ptr(), y)
+  &mut *core::ptr::slice_from_raw_parts_mut(x.as_ptr(), y)
 }
 
 #[inline(always)]
 pub(crate) unsafe fn copy_nonoverlapping<T>(src: NonNull<T>, dst: NonNull<T>, len: usize) {
-  std::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), len)
+  core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), len)
 }
 
 #[inline(always)]
@@ -89,7 +89,7 @@ pub(crate) fn alloc<T>(layout: Layout) -> Result<NonNull<T>, AllocError> {
     return Err(AllocError);
   }
 
-  let Some(p) = NonNull::new(unsafe { std::alloc::alloc(layout) }) else {
+  let Some(p) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }) else {
     return Err(AllocError);
   };
 
@@ -98,5 +98,5 @@ pub(crate) fn alloc<T>(layout: Layout) -> Result<NonNull<T>, AllocError> {
 
 #[inline(always)]
 pub(crate) unsafe fn dealloc<T>(x: NonNull<T>, layout: Layout) {
-  std::alloc::dealloc(cast(x).as_ptr(), layout)
+  alloc::alloc::dealloc(cast(x).as_ptr(), layout)
 }

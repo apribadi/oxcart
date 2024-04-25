@@ -61,6 +61,32 @@ LBB33_3:
 	mov x0, x1                          //
 	str x1, [x19, #8]                   // store upper bound
 	b LBB33_2                           //
+
+	mov x20, #0
+	mov x21, #0
+	ldp x1, x2, [x0]
+LBB24_1:
+	subs x8, x2, #16
+	b.lo LBB24_4
+	sub x1, x1, #16
+	mov x2, x8
+LBB24_3:
+	add x8, x21, #1
+	stp x1, x2, [x19]
+	stp x21, x20, [x1]
+	mov x20, x1
+	mov x21, x8
+	cmp x8, #1000
+	b.ne LBB24_1
+	b LBB24_5
+LBB24_4:
+	mov x0, sp
+	mov w3, #8
+	mov w4, #16
+	bl oxcart::alloc_slow
+	ldp x1, x2, [sp]
+	b LBB24_3
+LBB24_5:
 ```
 
 In this particular example, the compiler was able to see that the reference to
