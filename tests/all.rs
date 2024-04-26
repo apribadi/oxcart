@@ -1,6 +1,9 @@
+#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+
 use std::alloc::Layout;
 use std::mem::size_of;
 use oxcart::Arena;
+use oxcart::ArenaAllocator;
 use oxcart::Slot;
 use oxcart::Store;
 use expect_test::expect;
@@ -31,28 +34,34 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
+  let _ = arena.as_allocator();
 }
 
 #[test]
 fn test_special_traits() {
+  fn is_ref_unwind_safe<T: std::panic::RefUnwindSafe>() {}
   fn is_send<T: Send>() {}
   fn is_sync<T: Sync>() {}
   fn is_unwind_safe<T: std::panic::UnwindSafe>() {}
-  fn is_ref_unwind_safe<T: std::panic::RefUnwindSafe>() {}
 
+  is_ref_unwind_safe::<Store>();
   is_send::<Store>();
   is_sync::<Store>();
   is_unwind_safe::<Store>();
-  is_ref_unwind_safe::<Store>();
 
-  is_send::<Arena<'static>>();
-  is_unwind_safe::<Arena<'static>>();
   is_ref_unwind_safe::<Arena<'static>>();
+  is_send::<Arena<'static>>();
+  is_sync::<Arena<'static>>();
+  is_unwind_safe::<Arena<'static>>();
 
   is_send::<Slot<'static, u64>>();
   is_sync::<Slot<'static, u64>>();
   is_unwind_safe::<Slot<'static, u64>>();
   is_ref_unwind_safe::<Slot<'static, u64>>();
+
+  is_ref_unwind_safe::<ArenaAllocator<'static>>();
+  is_send::<ArenaAllocator<'static>>();
+  is_unwind_safe::<ArenaAllocator<'static>>();
 }
 
 #[test]
@@ -105,6 +114,17 @@ fn test_alloc_zero_sized() {
 }
 
 #[test]
+fn test_too_large_allocation() {
+  let too_large_nbytes = isize::MAX as usize - 1;
+  let too_large_layout = Layout::from_size_align(too_large_nbytes, 1).unwrap();
+  let too_large_nwords = too_large_nbytes / size_of::<usize>();
+  let mut store = Store::new();
+  let mut arena = store.arena();
+  assert!(arena.try_alloc_layout(too_large_layout).is_err());
+  assert!(arena.try_alloc_slice::<usize>(too_large_nwords).is_err());
+}
+
+#[test]
 fn test_growth() {
   let mut store = Store::with_capacity(0);
   let mut arena = store.arena();
@@ -124,6 +144,18 @@ fn test_growth() {
   let _ = arena.alloc().init([1_u8; 5]);
   let _ = arena.alloc().init([1_u8; 7]);
   let _ = arena.alloc().init([1_u8; 9]);
+}
+
+#[test]
+fn test_allocator_api() {
+  let mut store = Store::new();
+  let allocator = store.arena().as_allocator();
+  let mut x = allocator_api2::vec::Vec::new_in(&allocator);
+  let mut y = allocator_api2::vec::Vec::new_in(&allocator);
+  x.push(0);
+  y.push(0);
+  x.push(1);
+  y.push(1);
 }
 
 /*
@@ -174,17 +206,6 @@ fn test_linked_list() {
     }
     expect!["4950"].assert_eq(&format!("{:?}", y));
   }
-}
-
-#[test]
-fn test_too_big_allocation() {
-  let too_big_nbytes = isize::MAX as usize - 1;
-  let too_big_layout = Layout::from_size_align(too_big_nbytes, 1).unwrap();
-  let too_big_nwords = too_big_nbytes / size_of::<usize>();
-  let mut store = Store::new();
-  let mut arena = store.arena();
-  assert!(arena.try_alloc_layout(too_big_layout).is_err());
-  assert!(arena.try_alloc_slice::<usize>(too_big_nwords).is_err());
 }
 
 #[test]

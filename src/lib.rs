@@ -7,7 +7,7 @@ extern crate alloc;
 mod ptr;
 
 use alloc::alloc::Layout;
-use core::cell::Cell;
+use core::cell::UnsafeCell;
 use core::fmt;
 use core::hint::unreachable_unchecked;
 use core::marker::PhantomData;
@@ -38,11 +38,11 @@ unsafe impl Sync for Store { }
 /// TODO: writeme
 ///
 
-pub struct Arena<'a>(Cell<Span>, PhantomData<&'a ()>);
-
-impl<'a> core::panic::RefUnwindSafe for Arena<'a> { }
+pub struct Arena<'a>(Span, PhantomData<&'a ()>);
 
 unsafe impl<'a> Send for Arena<'a> { }
+
+unsafe impl<'a> Sync for Arena<'a> { }
 
 /// Uninitialized memory with lifetime `'a` which can hold a `T`.
 ///
@@ -54,6 +54,13 @@ pub struct Slot<'a, T>(NonNull<T>, PhantomData<&'a ()>) where T: ?Sized;
 unsafe impl<'a, T> Send for Slot<'a, T> where T: ?Sized { }
 
 unsafe impl<'a, T> Sync for Slot<'a, T> where T: ?Sized { }
+
+/// An `ArenaAllocator<'a>` is wrapper around an `Arena<'a>` that implements
+/// the `Allocator` trait. Notably, it is `!Sync`.
+
+pub struct ArenaAllocator<'a>(UnsafeCell<Arena<'a>>);
+
+impl<'a> core::panic::RefUnwindSafe for ArenaAllocator<'a> { }
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -245,7 +252,7 @@ impl Store {
   pub fn arena(&mut self) -> Arena<'_> {
     let r = unsafe { ptr::as_mut_ref(self.0) };
     r.flag = false;
-    Arena(Cell::new(r.next), PhantomData)
+    Arena(r.next, PhantomData)
   }
 }
 
@@ -373,10 +380,9 @@ fn alloc_impl<'a, E>(arena: &mut Arena<'a>, layout: Layout) -> Result<NonNull<u8
 where
   E: Fail
 {
-  let a = arena.0.get_mut();
-  let s = *a;
+  let s = arena.0;
   let s = unsafe { alloc_fast(s, layout) }?;
-  *a = s;
+  arena.0 = s;
   Ok(s.tail)
 }
 
@@ -551,13 +557,21 @@ impl<'a> Arena<'a> {
   pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
     alloc_layout(self, layout)
   }
+
+  /// TODO: writeme
+  ///
+
+  #[inline(always)]
+  pub fn as_allocator(self) -> ArenaAllocator<'a> {
+    ArenaAllocator(UnsafeCell::new(self))
+  }
 }
 
 impl<'a> fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     f.debug_tuple("Arena")
-      .field(&self.0.get().tail)
-      .field(&self.0.get().size)
+      .field(&self.0.tail)
+      .field(&self.0.size)
       .finish()
   }
 }
@@ -682,13 +696,19 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-unsafe impl<'a> allocator_api2::alloc::Allocator for Arena<'a> {
+unsafe impl<'a> allocator_api2::alloc::Allocator for ArenaAllocator<'a> {
   #[inline(always)]
   fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-    let s = self.0.get();
-    let s = unsafe { alloc_fast(s, layout) }?;
-    self.0.set(s);
-    Ok(ptr::as_slice(s.tail, layout.size()))
+    // SAFETY:
+    //
+    // The lifetime of the `&mut Arena<'a>` does not overlap with the lifetime
+    // of any other reference to the arena.
+    //
+    // In particular, it is not possible for the global allocator to access
+    // this allocator.
+
+    let x = unsafe { &mut *self.0.get() }.try_alloc_layout(layout)?;
+    Ok(ptr::as_slice(ptr::cast(ptr::from_ref(x)), x.len()))
   }
 
   #[inline(always)]
