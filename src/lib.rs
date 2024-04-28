@@ -29,7 +29,9 @@ pub use allocator_api2::alloc::AllocError;
 /// TODO: writeme
 ///
 
-pub struct Store(NonNull<Node>);
+pub struct Store<A = allocator_api2::alloc::Global>(NonNull<Node>, PhantomData<A>)
+where
+  A: allocator_api2::alloc::Allocator;
 
 unsafe impl Send for Store { }
 
@@ -203,7 +205,7 @@ where
 {
   let n = min(! (WORD - 1) & WORD - 1 + max(n, size_of::<Node>()), MAX_CHUNK);
   let p = chunk(n)?;
-  let t = unsafe { ptr::add(ptr::cast::<_, u8>(p), n) };
+  let t = unsafe { ptr::add(p, n) };
 
   let node = Node {
     next: Span::new(t, n - size_of::<Node>()),
@@ -214,7 +216,7 @@ where
 
   unsafe { ptr::write(p, node) };
 
-  Ok(Store(p))
+  Ok(Store(p, PhantomData))
 }
 
 impl Store {
@@ -256,14 +258,17 @@ impl Store {
   }
 }
 
-impl Drop for Store {
+impl<A> Drop for Store<A>
+where
+  A: allocator_api2::alloc::Allocator
+{
   fn drop(&mut self) {
     let root = self.0;
     let mut span = unsafe { ptr::as_ref(self.0) }.next;
 
     loop {
       let n = span.size + size_of::<Node>();
-      let p = ptr::cast::<_, Node>(unsafe { ptr::sub(span.tail, n) });
+      let p = unsafe { ptr::sub::<_, Node>(span.tail, n) };
       span = unsafe { ptr::as_ref(p) }.next;
       unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, CHUNK_ALIGN)) };
       if p == root { break; }
@@ -308,7 +313,7 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
 where
   E: Fail
 {
-  let a: &Node = ptr::as_ref(ptr::cast(ptr::sub(span.tail, span.size + size_of::<Node>())));
+  let a: &Node = ptr::as_ref(ptr::sub(span.tail, span.size + size_of::<Node>()));
   let r: &Node = ptr::as_ref(a.root);
 
   'grow: {
@@ -348,7 +353,7 @@ where
     );
 
   let p = match chunk(n) { Err(e) => return [Err(e)], Ok(p) => p };
-  let t = ptr::add(ptr::cast::<_, u8>(p), n);
+  let t = ptr::add(p, n);
 
   let node = Node {
     next: r.next,
@@ -634,7 +639,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
     while i < N {
       unsafe { ptr::write(x, f(i)) };
       i = i + 1;
-      x = unsafe { ptr::add(x, 1) };
+      x = unsafe { ptr::inc(x) };
     }
 
     unsafe { ptr::as_mut_ref(self.0) }
@@ -677,7 +682,7 @@ impl<'a, T> Slot<'a, [T]> {
     while i < self.0.len() {
       unsafe { ptr::write(x, f(i)) };
       i = i + 1;
-      x = unsafe { ptr::add(x, 1) };
+      x = unsafe { ptr::inc(x) };
     }
 
     unsafe { ptr::as_mut_ref(self.0) }
@@ -708,7 +713,7 @@ unsafe impl<'a> allocator_api2::alloc::Allocator for ArenaAllocator<'a> {
     // this allocator.
 
     let x = unsafe { &mut *self.0.get() }.try_alloc_layout(layout)?;
-    Ok(ptr::as_slice(ptr::cast(ptr::from_ref(x)), x.len()))
+    Ok(ptr::as_slice(ptr::cast(ptr::from_mut_ref(x)), x.len()))
   }
 
   #[inline(always)]

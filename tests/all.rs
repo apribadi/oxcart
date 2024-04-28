@@ -2,11 +2,12 @@
 
 use std::alloc::Layout;
 use std::mem::size_of;
+use allocator_api2::vec::Vec;
+use expect_test::expect;
 use oxcart::Arena;
 use oxcart::ArenaAllocator;
 use oxcart::Slot;
 use oxcart::Store;
-use expect_test::expect;
 
 #[test]
 fn test_api() {
@@ -150,8 +151,8 @@ fn test_growth() {
 fn test_allocator_api() {
   let mut store = Store::new();
   let allocator = store.arena().as_allocator();
-  let mut x = allocator_api2::vec::Vec::new_in(&allocator);
-  let mut y = allocator_api2::vec::Vec::new_in(&allocator);
+  let mut x = Vec::new_in(&allocator);
+  let mut y = Vec::new_in(&allocator);
   x.push(0);
   y.push(0);
   x.push(1);

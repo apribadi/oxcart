@@ -11,6 +11,14 @@ where
 }
 
 #[inline(always)]
+pub(crate) fn from_mut_ref<T>(x: &mut T) -> NonNull<T>
+where
+  T: ?Sized
+{
+  NonNull::from(x)
+}
+
+#[inline(always)]
 pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // NB: This must not be a `const` function.
   //
@@ -37,13 +45,18 @@ where
 }
 
 #[inline(always)]
-pub(crate) const unsafe fn add<T>(x: NonNull<T>, y: usize) -> NonNull<T> {
-  NonNull::new_unchecked(x.as_ptr().add(y))
+pub(crate) const unsafe fn add<T, U>(x: NonNull<T>, y: usize) -> NonNull<U> {
+  NonNull::new_unchecked(x.as_ptr().byte_add(y).cast())
 }
 
 #[inline(always)]
-pub(crate) const unsafe fn sub<T>(x: NonNull<T>, y: usize) -> NonNull<T> {
-  NonNull::new_unchecked(x.as_ptr().sub(y))
+pub(crate) const unsafe fn sub<T, U>(x: NonNull<T>, y: usize) -> NonNull<U> {
+  NonNull::new_unchecked(x.as_ptr().byte_sub(y).cast())
+}
+
+#[inline(always)]
+pub(crate) const unsafe fn inc<T>(x: NonNull<T>) -> NonNull<T> {
+  NonNull::new_unchecked(x.as_ptr().add(1))
 }
 
 #[inline(always)]
