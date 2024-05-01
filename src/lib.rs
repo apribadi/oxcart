@@ -16,6 +16,7 @@ use core::mem::align_of;
 use core::mem::needs_drop;
 use core::mem::size_of;
 use core::ptr::NonNull;
+use allocator_api2::alloc::Allocator;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -29,9 +30,7 @@ pub use allocator_api2::alloc::AllocError;
 /// TODO: writeme
 ///
 
-pub struct Store<A = allocator_api2::alloc::Global>(NonNull<Node>, PhantomData<A>)
-where
-  A: allocator_api2::alloc::Allocator;
+pub struct Store(NonNull<Root>);
 
 unsafe impl Send for Store { }
 
@@ -76,11 +75,15 @@ struct Span {
   size: usize,
 }
 
-struct Node {
-  next: Span,
-  root: NonNull<Node>,
-  flag: bool,
+struct Root {
+  head: NonNull<Head>,
+  last: NonNull<Head>,
   used: usize,
+}
+
+struct Head {
+  next: Span,
+  root: NonNull<Root>,
 }
 
 enum Error {
@@ -104,9 +107,7 @@ trait Fail: Copy + Sized {
 const BITS: usize = usize::BITS as usize;
 const WORD: usize = size_of::<usize>();
 
-const CHUNK_ALIGN: usize = max(WORD, align_of::<Node>());
-
-const INIT_SIZE: usize = 1 << 16; // 65536
+const DEFAULT_CAPACITY: usize = 1 << 16; // 65536
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
 const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
@@ -182,41 +183,47 @@ impl Span {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn chunk<E>(n: usize) -> Result<NonNull<Node>, E>
-where
-  E: Fail
-{
-  debug_assert!(n >= size_of::<Node>());
-  debug_assert!(n <= MAX_CHUNK);
-  debug_assert!(n % WORD == 0);
-
-  let layout = Layout::from_size_align(n, CHUNK_ALIGN).unwrap();
-
-  let Ok(x) = ptr::alloc(layout) else {
-    return E::fail(Error::GlobalAllocatorFailed(layout));
-  };
-
-  Ok(x)
-}
-
 fn store<E>(n: usize) -> Result<Store, E>
 where
   E: Fail
 {
-  let n = min(! (WORD - 1) & WORD - 1 + max(n, size_of::<Node>()), MAX_CHUNK);
-  let p = chunk(n)?;
-  let t = unsafe { ptr::add(p, n) };
+  const A: usize = max(WORD, align_of::<Head>());
+  const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
+  const C: usize = ! (WORD - 1) & WORD - 1 + size_of::<Root>();
+  const D: usize = ! (WORD - 1) & align_of::<Root>() - 1;
 
-  let node = Node {
-    next: Span::new(t, n - size_of::<Node>()),
-    root: p,
-    flag: false,
+  let n = ! (WORD - 1) & n;
+  let n = max(n, B + C + D);
+  let n = min(n, MAX_CHUNK);
+  let layout = unsafe { Layout::from_size_align_unchecked(n, A) };
+
+  let Ok(h) = ptr::alloc(layout) else {
+    return E::fail(Error::GlobalAllocatorFailed(layout));
+  };
+
+  let t = unsafe { ptr::add(h, n - (C + D)) };
+  let r = unsafe { ptr::align_up(t, align_of::<Root>()) };
+
+  let span = Span {
+    tail: t,
+    size: n - (B + C + D),
+  };
+
+  let root = Root {
+    head: h,
+    last: h,
     used: n,
   };
 
-  unsafe { ptr::write(p, node) };
+  let head = Head {
+    next: span,
+    root: r,
+  };
 
-  Ok(Store(p, PhantomData))
+  unsafe { ptr::write(h, head) };
+  unsafe { ptr::write(r, root) };
+
+  Ok(Store(r))
 }
 
 impl Store {
@@ -227,7 +234,7 @@ impl Store {
   /// Panics on failure to allocate memory.
 
   pub fn new() -> Self {
-    unwrap(store(INIT_SIZE))
+    unwrap(store(DEFAULT_CAPACITY))
   }
 
   /// Allocates a new store with a default capacity.
@@ -237,7 +244,7 @@ impl Store {
   /// An error is returned on failure to allocate memory.
 
   pub fn try_new() -> Result<Self, AllocError> {
-    store(INIT_SIZE)
+    store(DEFAULT_CAPACITY)
   }
 
   pub fn with_capacity(capacity: usize) -> Self {
@@ -253,25 +260,34 @@ impl Store {
 
   pub fn arena(&mut self) -> Arena<'_> {
     let r = unsafe { ptr::as_mut_ref(self.0) };
-    r.flag = false;
-    Arena(r.next, PhantomData)
+    r.last = r.head;
+    let h = unsafe { ptr::as_ref(r.head) };
+    Arena(h.next, PhantomData)
   }
 }
 
-impl<A> Drop for Store<A>
-where
-  A: allocator_api2::alloc::Allocator
-{
+impl Drop for Store {
   fn drop(&mut self) {
-    let root = self.0;
-    let mut span = unsafe { ptr::as_ref(self.0) }.next;
+    const A: usize = max(WORD, align_of::<Head>());
+    const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
+    const C: usize = ! (WORD - 1) & WORD - 1 + size_of::<Root>();
+    const D: usize = ! (WORD - 1) & align_of::<Root>() - 1;
+
+    let start = unsafe { ptr::as_ref(self.0) }.head;
+    let mut span = unsafe { ptr::as_ref(start) }.next;
 
     loop {
-      let n = span.size + size_of::<Node>();
-      let p = unsafe { ptr::sub::<_, Node>(span.tail, n) };
-      span = unsafe { ptr::as_ref(p) }.next;
-      unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, CHUNK_ALIGN)) };
-      if p == root { break; }
+      let p = unsafe { ptr::sub(span.tail, span.size + B) };
+
+      if p != start {
+        let n = span.size + B;
+        span = unsafe { ptr::as_ref::<Head>(p) }.next;
+        unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, A)) };
+      } else {
+        let n = span.size + B + C+ D;
+        unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, A)) };
+        break;
+      }
     }
   }
 }
@@ -293,6 +309,8 @@ unsafe fn alloc_fast<E>(span: Span, layout: Layout) -> Result<Span, E>
 where
   E: Fail
 {
+  debug_assert!(ptr::is_aligned_to(span.tail, WORD));
+
   if ! ptr::is_aligned_to(span.tail, WORD) { unreachable_unchecked(); }
 
   let m =
@@ -313,58 +331,65 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
 where
   E: Fail
 {
-  let a: &Node = ptr::as_ref(ptr::sub(span.tail, span.size + size_of::<Node>()));
-  let r: &Node = ptr::as_ref(a.root);
+  const A: usize = max(WORD, align_of::<Head>());
+  const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
+
+  let h = ptr::as_ref::<Head>(ptr::sub(span.tail, span.size + B));
+  let r = ptr::as_mut_ref(h.root);
 
   'grow: {
-    if ptr::from_ref(a) == ptr::from_ref(r) || r.flag {
+    if ptr::from_ref(h) == r.last {
       break 'grow;
     }
 
     let m =
       layout.size() + (
         (WORD - 1 | layout.align() - 1) &
-          ptr::addr(a.next.tail).wrapping_sub(layout.size()));
+          ptr::addr(h.next.tail).wrapping_sub(layout.size()));
 
-    let Some(n) = a.next.size.checked_sub(m) else {
+    let Some(n) = h.next.size.checked_sub(m) else {
       break 'grow;
     };
 
-    return [Ok(Span::new(ptr::sub(a.next.tail, m), n))];
+    return [Ok(Span::new(ptr::sub(h.next.tail, m), n))];
   }
-
-  let r: &mut Node = ptr::as_mut_ref(r.root);
 
   if ! (layout.size() <= MAX_ALLOC && layout.align() <= MAX_ALIGN) {
     return [E::fail(Error::TooLarge)];
   }
 
+  let h = ptr::as_mut_ref(r.head);
+
   let n =
     1 << BITS - clz(
       max(
         max(
-          r.next.size + size_of::<Node>(),
+          h.next.size, // ???
           r.used / 4 + 1,
         ),
-        size_of::<Node>()
+        B + (! (WORD - 1) & WORD - 1 + layout.size())
           + (! (WORD - 1) & layout.align() - 1)
-          + (! (WORD - 1) & WORD - 1 + layout.size())
       ) - 1
     );
 
-  let p = match chunk(n) { Err(e) => return [Err(e)], Ok(p) => p };
-  let t = ptr::add(p, n);
+  let chunk_layout = unsafe { Layout::from_size_align_unchecked(n, A) };
 
-  let node = Node {
-    next: r.next,
-    root: r.root,
-    flag: /* dummy */ false,
-    used: /* dummy */ 0,
+  let Ok(p) = ptr::alloc(chunk_layout) else {
+    return [E::fail(Error::GlobalAllocatorFailed(chunk_layout))];
   };
 
-  ptr::write(p, node);
+  let t = ptr::add(p, n);
 
-  let span = Span::new(t, n - size_of::<Node>());
+  assert!(ptr::is_aligned_to(t, WORD));
+
+  let head = Head {
+    next: h.next,
+    root: h.root,
+  };
+
+  ptr::write(p, head);
+
+  let span = Span::new(t, n - B);
 
   let m =
     layout.size() + (
@@ -373,8 +398,8 @@ where
 
   debug_assert!(m <= span.size);
 
-  r.next = span;
-  r.flag = true;
+  h.next = span;
+  r.last = p;
   r.used = r.used.saturating_add(n);
 
   [Ok(Span::new(ptr::sub(span.tail, m), span.size - m))]
@@ -701,7 +726,7 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-unsafe impl<'a> allocator_api2::alloc::Allocator for ArenaAllocator<'a> {
+unsafe impl<'a> Allocator for ArenaAllocator<'a> {
   #[inline(always)]
   fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
     // SAFETY:

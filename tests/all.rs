@@ -2,12 +2,12 @@
 
 use std::alloc::Layout;
 use std::mem::size_of;
-use allocator_api2::vec::Vec;
-use expect_test::expect;
 use oxcart::Arena;
 use oxcart::ArenaAllocator;
 use oxcart::Slot;
 use oxcart::Store;
+use allocator_api2::vec::Vec;
+use expect_test::expect;
 
 #[test]
 fn test_api() {
@@ -158,32 +158,6 @@ fn test_allocator_api() {
   x.push(1);
   y.push(1);
 }
-
-/*
-#[test]
-fn test_alloc_aligned() {
-  let mut store = Store::new();
-  let mut arena = store.arena();
-  for &align in &[1, 2, 4, 8, 16, 32, 64] {
-    let p = arena.alloc_layout(Layout::from_size_align(1, align).unwrap());
-    assert!(ptr::from(p).addr() & (align - 1) == 0);
-  }
-}
-*/
-
-/*
-#[test]
-fn test_format() {
-  let mut store = Store::new();
-  expect!["Store { total_allocated: 16384 }"].assert_eq(&format!("{:?}", store));
-  let mut arena = store.arena();
-  expect!["Allocator(0x000000015b808200, 16344)"].assert_eq(&format!("{:?}", arena));
-  let a = arena.alloc::<u64>();
-  expect!["Slot(0x000000015b808200)"].assert_eq(&format!("{:?}", a));
-  let b = arena.alloc::<u64>();
-  expect!["Slot(0x000000015b808208)"].assert_eq(&format!("{:?}", b));
-}
-*/
 
 #[test]
 fn test_linked_list() {

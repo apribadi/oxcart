@@ -37,6 +37,11 @@ pub(crate) fn is_aligned_to<T>(x: NonNull<T>, y: usize) -> bool {
 }
 
 #[inline(always)]
+pub(crate) unsafe fn align_up<T, U>(x: NonNull<T>, y: usize) -> NonNull<U> {
+  add(x, y - 1 & addr(x).wrapping_neg())
+}
+
+#[inline(always)]
 pub(crate) const fn cast<T, U>(x: NonNull<T>) -> NonNull<U>
 where
   T: ?Sized
