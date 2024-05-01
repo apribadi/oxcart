@@ -105,7 +105,7 @@ trait Fail: Copy + Sized {
 ////////////////////////////////////////////////////////////////////////////////
 
 const BITS: usize = usize::BITS as usize;
-const WORD: usize = size_of::<usize>();
+const WORD: usize = align_of::<usize>();
 
 const DEFAULT_CAPACITY: usize = 1 << 16; // 65536
 
@@ -267,13 +267,16 @@ impl Drop for Store {
   fn drop(&mut self) {
     let last = unsafe { ptr::as_ref(self.0) }.head;
     let mut span = unsafe { ptr::as_ref(last) }.next;
+
     loop {
       let p = unsafe { ptr::sub(span.tail, span.size + HEAD_SIZE) };
+
       if p == last {
-        let n = span.size + HEAD_SIZE + ROOT_SIZE+ ROOT_SLOP;
+        let n = span.size + HEAD_SIZE + ROOT_SIZE + ROOT_SLOP;
         unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, ALIGN)) };
         break;
       }
+
       let n = span.size + HEAD_SIZE;
       span = unsafe { ptr::as_ref(p) }.next;
       unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, ALIGN)) };
@@ -318,7 +321,7 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
 where
   E: Fail
 {
-  let h = ptr::as_ref::<Head>(ptr::sub(span.tail, span.size + HEAD_SIZE));
+  let h: &Head = ptr::as_ref(ptr::sub(span.tail, span.size + HEAD_SIZE));
   let r = ptr::as_mut_ref(h.root);
 
   'grow: {
@@ -420,8 +423,8 @@ where
     return E::fail(Error::TooLarge);
   }
 
-  let layout = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = alloc_impl(arena, layout)?;
+  let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
+  let x = alloc_impl(arena, l)?;
   Ok(Slot(ptr::as_slice(ptr::cast(x), len), PhantomData))
 }
 
