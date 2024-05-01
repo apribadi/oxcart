@@ -1,4 +1,5 @@
 use alloc::alloc::Layout;
+use core::mem::align_of;
 use core::ptr::NonNull;
 use allocator_api2::alloc::AllocError;
 
@@ -37,8 +38,8 @@ pub(crate) fn is_aligned_to<T>(x: NonNull<T>, y: usize) -> bool {
 }
 
 #[inline(always)]
-pub(crate) unsafe fn align_up<T, U>(x: NonNull<T>, y: usize) -> NonNull<U> {
-  add(x, y - 1 & addr(x).wrapping_neg())
+pub(crate) unsafe fn align_up<T, U>(x: NonNull<T>) -> NonNull<U> {
+  add(x, align_of::<U>() - 1 & addr(x).wrapping_neg())
 }
 
 #[inline(always)]

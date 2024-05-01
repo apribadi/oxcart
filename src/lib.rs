@@ -108,9 +108,16 @@ const BITS: usize = usize::BITS as usize;
 const WORD: usize = size_of::<usize>();
 
 const DEFAULT_CAPACITY: usize = 1 << 16; // 65536
+
 const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
 const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
 const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
+
+const ALIGN: usize = max(WORD, align_of::<Head>());
+
+const HEAD_SIZE: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
+const ROOT_SIZE: usize = ! (WORD - 1) & WORD - 1 + size_of::<Root>();
+const ROOT_SLOP: usize = ! (WORD - 1) & align_of::<Root>() - 1;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -187,27 +194,17 @@ fn store<E>(n: usize) -> Result<Store, E>
 where
   E: Fail
 {
-  const A: usize = max(WORD, align_of::<Head>());
-  const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
-  const C: usize = ! (WORD - 1) & WORD - 1 + size_of::<Root>();
-  const D: usize = ! (WORD - 1) & align_of::<Root>() - 1;
-
   let n = ! (WORD - 1) & n;
-  let n = max(n, B + C + D);
+  let n = max(n, HEAD_SIZE + ROOT_SIZE + ROOT_SLOP);
   let n = min(n, MAX_CHUNK);
-  let layout = unsafe { Layout::from_size_align_unchecked(n, A) };
+  let l = unsafe { Layout::from_size_align_unchecked(n, ALIGN) };
 
-  let Ok(h) = ptr::alloc(layout) else {
-    return E::fail(Error::GlobalAllocatorFailed(layout));
+  let Ok(h) = ptr::alloc(l) else {
+    return E::fail(Error::GlobalAllocatorFailed(l));
   };
 
-  let t = unsafe { ptr::add(h, n - (C + D)) };
-  let r = unsafe { ptr::align_up(t, align_of::<Root>()) };
-
-  let span = Span {
-    tail: t,
-    size: n - (B + C + D),
-  };
+  let t = unsafe { ptr::add(h, n - (ROOT_SIZE + ROOT_SLOP)) };
+  let r = unsafe { ptr::align_up(t) };
 
   let root = Root {
     head: h,
@@ -216,7 +213,7 @@ where
   };
 
   let head = Head {
-    next: span,
+    next: Span::new(t, n - (HEAD_SIZE + ROOT_SIZE + ROOT_SLOP)),
     root: r,
   };
 
@@ -268,26 +265,18 @@ impl Store {
 
 impl Drop for Store {
   fn drop(&mut self) {
-    const A: usize = max(WORD, align_of::<Head>());
-    const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
-    const C: usize = ! (WORD - 1) & WORD - 1 + size_of::<Root>();
-    const D: usize = ! (WORD - 1) & align_of::<Root>() - 1;
-
-    let start = unsafe { ptr::as_ref(self.0) }.head;
-    let mut span = unsafe { ptr::as_ref(start) }.next;
-
+    let last = unsafe { ptr::as_ref(self.0) }.head;
+    let mut span = unsafe { ptr::as_ref(last) }.next;
     loop {
-      let p = unsafe { ptr::sub(span.tail, span.size + B) };
-
-      if p != start {
-        let n = span.size + B;
-        span = unsafe { ptr::as_ref::<Head>(p) }.next;
-        unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, A)) };
-      } else {
-        let n = span.size + B + C+ D;
-        unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, A)) };
+      let p = unsafe { ptr::sub(span.tail, span.size + HEAD_SIZE) };
+      if p == last {
+        let n = span.size + HEAD_SIZE + ROOT_SIZE+ ROOT_SLOP;
+        unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, ALIGN)) };
         break;
       }
+      let n = span.size + HEAD_SIZE;
+      span = unsafe { ptr::as_ref(p) }.next;
+      unsafe { ptr::dealloc(p, Layout::from_size_align_unchecked(n, ALIGN)) };
     }
   }
 }
@@ -309,8 +298,6 @@ unsafe fn alloc_fast<E>(span: Span, layout: Layout) -> Result<Span, E>
 where
   E: Fail
 {
-  debug_assert!(ptr::is_aligned_to(span.tail, WORD));
-
   if ! ptr::is_aligned_to(span.tail, WORD) { unreachable_unchecked(); }
 
   let m =
@@ -331,10 +318,7 @@ unsafe fn alloc_slow<E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
 where
   E: Fail
 {
-  const A: usize = max(WORD, align_of::<Head>());
-  const B: usize = ! (WORD - 1) & WORD - 1 + size_of::<Head>();
-
-  let h = ptr::as_ref::<Head>(ptr::sub(span.tail, span.size + B));
+  let h = ptr::as_ref::<Head>(ptr::sub(span.tail, span.size + HEAD_SIZE));
   let r = ptr::as_mut_ref(h.root);
 
   'grow: {
@@ -364,23 +348,25 @@ where
     1 << BITS - clz(
       max(
         max(
-          h.next.size, // ???
+          max(
+            WORD,
+            h.next.size + HEAD_SIZE,
+          ),
           r.used / 4 + 1,
         ),
-        B + (! (WORD - 1) & WORD - 1 + layout.size())
+        HEAD_SIZE
+          + (! (WORD - 1) & WORD - 1 + layout.size())
           + (! (WORD - 1) & layout.align() - 1)
       ) - 1
     );
 
-  let chunk_layout = unsafe { Layout::from_size_align_unchecked(n, A) };
+  let l = unsafe { Layout::from_size_align_unchecked(n, ALIGN) };
 
-  let Ok(p) = ptr::alloc(chunk_layout) else {
-    return [E::fail(Error::GlobalAllocatorFailed(chunk_layout))];
+  let Ok(p) = ptr::alloc(l) else {
+    return [E::fail(Error::GlobalAllocatorFailed(l))];
   };
 
   let t = ptr::add(p, n);
-
-  assert!(ptr::is_aligned_to(t, WORD));
 
   let head = Head {
     next: h.next,
@@ -389,7 +375,7 @@ where
 
   ptr::write(p, head);
 
-  let span = Span::new(t, n - B);
+  let span = Span::new(t, n - HEAD_SIZE);
 
   let m =
     layout.size() + (
