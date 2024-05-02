@@ -1,7 +1,5 @@
-use alloc::alloc::Layout;
 use core::mem::align_of;
 use core::ptr::NonNull;
-use allocator_api2::alloc::AllocError;
 
 #[inline(always)]
 pub(crate) fn from_ref<T>(x: &T) -> NonNull<T>
@@ -66,6 +64,11 @@ pub(crate) const unsafe fn inc<T>(x: NonNull<T>) -> NonNull<T> {
 }
 
 #[inline(always)]
+pub(crate) unsafe fn read<T>(x: NonNull<T>) -> T {
+  x.as_ptr().read()
+}
+
+#[inline(always)]
 pub(crate) unsafe fn write<T>(x: NonNull<T>, y: T) {
   x.as_ptr().write(y)
 }
@@ -100,22 +103,4 @@ pub(crate) unsafe fn as_slice_mut_ref<'a, T>(x: NonNull<T>, y: usize) -> &'a mut
 #[inline(always)]
 pub(crate) unsafe fn copy_nonoverlapping<T>(src: NonNull<T>, dst: NonNull<T>, len: usize) {
   core::ptr::copy_nonoverlapping(src.as_ptr(), dst.as_ptr(), len)
-}
-
-#[inline(always)]
-pub(crate) fn alloc<T>(layout: Layout) -> Result<NonNull<T>, AllocError> {
-  if layout.size() == 0 {
-    return Err(AllocError);
-  }
-
-  let Some(p) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }) else {
-    return Err(AllocError);
-  };
-
-  Ok(cast(p))
-}
-
-#[inline(always)]
-pub(crate) unsafe fn dealloc<T>(x: NonNull<T>, layout: Layout) {
-  alloc::alloc::dealloc(cast(x).as_ptr(), layout)
 }

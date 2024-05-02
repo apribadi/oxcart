@@ -6,6 +6,7 @@ use oxcart::Arena;
 use oxcart::ArenaAllocator;
 use oxcart::Slot;
 use oxcart::Store;
+use allocator_api2::alloc::Global;
 use allocator_api2::vec::Vec;
 use expect_test::expect;
 
@@ -40,28 +41,34 @@ fn test_api() {
 
 #[test]
 fn test_special_traits() {
-  fn is_ref_unwind_safe<T: std::panic::RefUnwindSafe>() {}
-  fn is_send<T: Send>() {}
-  fn is_sync<T: Sync>() {}
-  fn is_unwind_safe<T: std::panic::UnwindSafe>() {}
+  fn is_ref_unwind_safe<T: std::panic::RefUnwindSafe>() { }
+  fn is_send<T: Send>() { }
+  fn is_sync<T: Sync>() { }
+  fn is_unpin<T: Unpin>() { }
+  fn is_unwind_safe<T: std::panic::UnwindSafe>() { }
 
-  is_ref_unwind_safe::<Store>();
-  is_send::<Store>();
-  is_sync::<Store>();
-  is_unwind_safe::<Store>();
+  is_ref_unwind_safe::<Store<Global>>();
+  is_send::<Store<Global>>();
+  is_sync::<Store<Global>>();
+  is_unpin::<Store<Global>>();
+  is_unwind_safe::<Store<Global>>();
 
   is_ref_unwind_safe::<Arena<'static>>();
   is_send::<Arena<'static>>();
   is_sync::<Arena<'static>>();
+  is_unpin::<Arena<'static>>();
   is_unwind_safe::<Arena<'static>>();
 
+  is_ref_unwind_safe::<Slot<'static, u64>>();
   is_send::<Slot<'static, u64>>();
   is_sync::<Slot<'static, u64>>();
+  is_unpin::<Slot<'static, u64>>();
   is_unwind_safe::<Slot<'static, u64>>();
-  is_ref_unwind_safe::<Slot<'static, u64>>();
 
   is_ref_unwind_safe::<ArenaAllocator<'static>>();
   is_send::<ArenaAllocator<'static>>();
+  // is_sync::<ArenaAllocator<'static>>();
+  is_unpin::<ArenaAllocator<'static>>();
   is_unwind_safe::<ArenaAllocator<'static>>();
 }
 
