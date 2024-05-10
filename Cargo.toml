@@ -1,7 +1,7 @@
 [package]
 authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
 categories = ["memory-management", "rust-patterns"]
-description = "a high performance arena allocator"
+description = "A high performance arena allocator."
 edition = "2021"
 license = "Artistic-2.0"
 name = "oxcart"
@@ -16,11 +16,13 @@ bumpalo = "3.16.0"
 expect-test = "1.5.0"
 
 [features]
-allocator_api = []
+allocator_api = ["allocator-api2/nightly"]
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
+missing_docs = "warn"
 non_ascii_idents = "warn"
+non_snake_case = "allow"
 trivial_numeric_casts = "warn"
 unreachable_pub = "warn"
 unused_lifetimes = "warn"

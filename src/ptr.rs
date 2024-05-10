@@ -10,14 +10,6 @@ where
 }
 
 #[inline(always)]
-pub(crate) fn from_mut_ref<T>(x: &mut T) -> NonNull<T>
-where
-  T: ?Sized
-{
-  NonNull::from(x)
-}
-
-#[inline(always)]
 pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // NB: This must not be a `const` function.
   //
@@ -28,11 +20,6 @@ pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // use the `addr` method on the primitive pointer type.
 
   unsafe { core::mem::transmute::<*mut T, usize>(x.as_ptr()) }
-}
-
-#[inline(always)]
-pub(crate) fn is_aligned_to<T>(x: NonNull<T>, y: usize) -> bool {
-  addr(x) & y - 1 == 0
 }
 
 #[inline(always)]

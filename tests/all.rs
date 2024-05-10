@@ -3,9 +3,9 @@
 use std::alloc::Layout;
 use std::mem::size_of;
 use oxcart::Arena;
-use oxcart::ArenaAllocator;
 use oxcart::Slot;
 use oxcart::Store;
+use oxcart::UnsyncArena;
 use allocator_api2::alloc::Global;
 use allocator_api2::vec::Vec;
 use expect_test::expect;
@@ -36,7 +36,7 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
-  let _ = arena.as_allocator();
+  let _ = store.unsync_arena();
 }
 
 #[test]
@@ -65,11 +65,11 @@ fn test_special_traits() {
   is_unpin::<Slot<'static, u64>>();
   is_unwind_safe::<Slot<'static, u64>>();
 
-  is_ref_unwind_safe::<ArenaAllocator<'static>>();
-  is_send::<ArenaAllocator<'static>>();
-  // is_sync::<ArenaAllocator<'static>>();
-  is_unpin::<ArenaAllocator<'static>>();
-  is_unwind_safe::<ArenaAllocator<'static>>();
+  is_ref_unwind_safe::<UnsyncArena<'static>>();
+  is_send::<UnsyncArena<'static>>();
+  // is_sync::<UnsyncArena<'static>>();
+  is_unpin::<UnsyncArena<'static>>();
+  is_unwind_safe::<UnsyncArena<'static>>();
 }
 
 #[test]
@@ -157,9 +157,9 @@ fn test_growth() {
 #[test]
 fn test_allocator_api() {
   let mut store = Store::new();
-  let allocator = store.arena().as_allocator();
-  let mut x = Vec::new_in(&allocator);
-  let mut y = Vec::new_in(&allocator);
+  let arena = store.unsync_arena();
+  let mut x = Vec::new_in(&arena);
+  let mut y = Vec::new_in(&arena);
   x.push(0);
   y.push(0);
   x.push(1);

@@ -1,3 +1,5 @@
+//! Run benchmarks.
+
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 use std::alloc::Layout;
