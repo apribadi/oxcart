@@ -57,16 +57,16 @@ unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
 
 unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
 
-/// An `UnsyncArena<'a>` is an arena that uses interior mutability to implement
-/// the `Allocator` trait.
+/// An `ArenaCell<'a, _>` is an arena that uses interior mutability to
+/// implement the `Allocator` trait.
 ///
 /// Notably, it is `!Sync`.
 
-pub struct UnsyncArena<'a, A: Allocator = Global>(UnsafeCell<Arena<'a, A>>);
+pub struct ArenaCell<'a, A: Allocator = Global>(UnsafeCell<Arena<'a, A>>);
 
-unsafe impl<'a, A: Allocator> Send for UnsyncArena<'a, A> where A: Send { }
+unsafe impl<'a, A: Allocator> Send for ArenaCell<'a, A> where A: Send { }
 
-impl<'a, A: Allocator> RefUnwindSafe for UnsyncArena<'a, A> { }
+impl<'a, A: Allocator> RefUnwindSafe for ArenaCell<'a, A> { }
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -321,8 +321,8 @@ impl<A: Allocator> Store<A> {
   ///
   ///
 
-  pub fn unsync_arena(&mut self) -> UnsyncArena<'_, A> {
-    UnsyncArena(UnsafeCell::new(self.arena()))
+  pub fn arena_cell(&mut self) -> ArenaCell<'_, A> {
+    ArenaCell(UnsafeCell::new(self.arena()))
   }
 
   /// A reference to the parent allocator.
@@ -785,7 +785,7 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-unsafe impl<'a, A: Allocator> Allocator for UnsyncArena<'a, A> {
+unsafe impl<'a, A: Allocator> Allocator for ArenaCell<'a, A> {
   #[inline(always)]
   fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
     // SAFETY:

@@ -3,10 +3,9 @@
 use std::alloc::Layout;
 use std::mem::size_of;
 use oxcart::Arena;
+use oxcart::ArenaCell;
 use oxcart::Slot;
 use oxcart::Store;
-use oxcart::UnsyncArena;
-use allocator_api2::alloc::Global;
 use allocator_api2::vec::Vec;
 use expect_test::expect;
 
@@ -36,7 +35,7 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
-  let _ = store.unsync_arena();
+  let _ = store.arena_cell();
 }
 
 #[test]
@@ -47,11 +46,11 @@ fn test_special_traits() {
   fn is_unpin<T: Unpin>() { }
   fn is_unwind_safe<T: std::panic::UnwindSafe>() { }
 
-  is_ref_unwind_safe::<Store<Global>>();
-  is_send::<Store<Global>>();
-  is_sync::<Store<Global>>();
-  is_unpin::<Store<Global>>();
-  is_unwind_safe::<Store<Global>>();
+  is_ref_unwind_safe::<Store>();
+  is_send::<Store>();
+  is_sync::<Store>();
+  is_unpin::<Store>();
+  is_unwind_safe::<Store>();
 
   is_ref_unwind_safe::<Arena<'static>>();
   is_send::<Arena<'static>>();
@@ -65,11 +64,11 @@ fn test_special_traits() {
   is_unpin::<Slot<'static, u64>>();
   is_unwind_safe::<Slot<'static, u64>>();
 
-  is_ref_unwind_safe::<UnsyncArena<'static>>();
-  is_send::<UnsyncArena<'static>>();
-  // is_sync::<UnsyncArena<'static>>();
-  is_unpin::<UnsyncArena<'static>>();
-  is_unwind_safe::<UnsyncArena<'static>>();
+  is_ref_unwind_safe::<ArenaCell<'static>>();
+  is_send::<ArenaCell<'static>>();
+  // is_sync::<ArenaCell<'static>>();
+  is_unpin::<ArenaCell<'static>>();
+  is_unwind_safe::<ArenaCell<'static>>();
 }
 
 #[test]
@@ -157,7 +156,7 @@ fn test_growth() {
 #[test]
 fn test_allocator_api() {
   let mut store = Store::new();
-  let arena = store.unsync_arena();
+  let arena = store.arena_cell();
   let mut x = Vec::new_in(&arena);
   let mut y = Vec::new_in(&arena);
   x.push(0);
