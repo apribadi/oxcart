@@ -1,4 +1,5 @@
 use core::mem::align_of;
+use core::mem::transmute;
 use core::ptr::NonNull;
 
 #[inline(always)]
@@ -7,6 +8,11 @@ where
   T: ?Sized
 {
   NonNull::from(x)
+}
+
+#[inline(always)]
+pub(crate) unsafe fn invalid<T>(addr: usize) -> NonNull<T> {
+  unsafe { NonNull::new_unchecked(transmute::<usize, *mut T>(addr)) }
 }
 
 #[inline(always)]
@@ -19,7 +25,7 @@ pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // Once the `strict_provenance` feature has been stabilized, this should
   // use the `addr` method on the primitive pointer type.
 
-  unsafe { core::mem::transmute::<*mut T, usize>(x.as_ptr()) }
+  unsafe { transmute::<*mut T, usize>(x.as_ptr()) }
 }
 
 #[inline(always)]

@@ -3,10 +3,9 @@
 use std::alloc::Layout;
 use std::mem::size_of;
 use oxcart::Arena;
-use oxcart::ArenaCell;
 use oxcart::Slot;
 use oxcart::Store;
-use allocator_api2::vec::Vec;
+// use allocator_api2::vec::Vec;
 use expect_test::expect;
 
 #[test]
@@ -35,7 +34,6 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
-  let _ = store.arena_cell();
 }
 
 #[test]
@@ -63,12 +61,6 @@ fn test_special_traits() {
   is_sync::<Slot<'static, u64>>();
   is_unpin::<Slot<'static, u64>>();
   is_unwind_safe::<Slot<'static, u64>>();
-
-  is_ref_unwind_safe::<ArenaCell<'static>>();
-  is_send::<ArenaCell<'static>>();
-  // is_sync::<ArenaCell<'static>>();
-  is_unpin::<ArenaCell<'static>>();
-  is_unwind_safe::<ArenaCell<'static>>();
 }
 
 #[test]
@@ -153,6 +145,7 @@ fn test_growth() {
   let _ = arena.alloc().init([1_u8; 9]);
 }
 
+/*
 #[test]
 fn test_allocator_api() {
   let mut store = Store::new();
@@ -164,6 +157,7 @@ fn test_allocator_api() {
   x.push(1);
   y.push(1);
 }
+*/
 
 #[test]
 fn test_linked_list() {

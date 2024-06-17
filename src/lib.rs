@@ -2,8 +2,9 @@
 #![no_std]
 #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
+extern crate alloc;
+
 use core::alloc::Layout;
-use core::cell::UnsafeCell;
 use core::fmt;
 use core::hint::unreachable_unchecked;
 use core::marker::PhantomData;
@@ -11,13 +12,7 @@ use core::mem::MaybeUninit;
 use core::mem::align_of;
 use core::mem::needs_drop;
 use core::mem::size_of;
-use core::panic::RefUnwindSafe;
 use core::ptr::NonNull;
-
-use allocator_api2::alloc::AllocError;
-use allocator_api2::alloc::Allocator;
-use allocator_api2::alloc::Global;
-use allocator_api2::alloc::handle_alloc_error;
 
 mod ptr;
 
@@ -26,7 +21,6 @@ mod ptr;
 // PUBLIC TYPE AND TRAIT DEFINITIONS                                          //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
-
 
 /// TODO: writeme
 ///
@@ -57,16 +51,30 @@ unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
 
 unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
 
-/// An `ArenaCell<'a, _>` is an arena that uses interior mutability to
-/// implement the `Allocator` trait.
+/// TODO: writeme
 ///
-/// Notably, it is `!Sync`.
 
-pub struct ArenaCell<'a, A: Allocator = Global>(UnsafeCell<Arena<'a, A>>);
+pub struct AllocError;
 
-unsafe impl<'a, A: Allocator> Send for ArenaCell<'a, A> where A: Send { }
+/// TODO: writeme
+///
 
-impl<'a, A: Allocator> RefUnwindSafe for ArenaCell<'a, A> { }
+pub struct Global;
+
+pub unsafe trait Allocator {
+  //! TODO: writeme
+  //!
+
+  /// TODO: writeme
+  ///
+
+  fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError>;
+
+  /// TODO: writeme
+  ///
+
+  unsafe fn free(&mut self, ptr: NonNull<u8>, layout: Layout);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -158,7 +166,7 @@ impl Fail for Panicked {
   fn fail<T>(e: Error) -> Result<T, Self> {
     match e {
       Error::ParentAllocatorFailed(layout) =>
-        handle_alloc_error(layout),
+        alloc::alloc::handle_alloc_error(layout),
       Error::TooLarge =>
         panic!("oxcart: attempted an allocation that is too large!"),
     }
@@ -201,12 +209,14 @@ where
   let ROOT_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Root<A>>() };
   let ROOT_SLOP = const { ! (WORD - 1) & align_of::<Root<A>>() - 1 };
 
+  let mut allocator = allocator;
+
   let n = ! (WORD - 1) & capacity;
   let n = max(n, HEAD_SIZE + ROOT_SIZE + ROOT_SLOP);
   let n = min(n, MAX_CHUNK);
   let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
 
-  let Ok(h) = allocator.allocate(l) else {
+  let Ok(h) = allocator.alloc(l) else {
     return E::fail(Error::ParentAllocatorFailed(l));
   };
 
@@ -317,14 +327,6 @@ impl<A: Allocator> Store<A> {
     Arena(h.next, PhantomData)
   }
 
-  /// TODO: writeme
-  ///
-  ///
-
-  pub fn arena_cell(&mut self) -> ArenaCell<'_, A> {
-    ArenaCell(UnsafeCell::new(self.arena()))
-  }
-
   /// A reference to the parent allocator.
 
   pub fn allocator(&self) -> &A {
@@ -344,7 +346,7 @@ impl<A: Allocator> Drop for Store<A> {
     let last = root.head;
     let mut span = unsafe { ptr::as_ref(last) }.next;
 
-    let allocator = unsafe { ptr::read(ptr::from_ref(&root.allocator)) };
+    let mut allocator = unsafe { ptr::read(ptr::from_ref(&root.allocator)) };
 
     loop {
       let p = unsafe { ptr::sub(span.tail, span.size + HEAD_SIZE) };
@@ -352,14 +354,14 @@ impl<A: Allocator> Drop for Store<A> {
       if p == last {
         let n = span.size + HEAD_SIZE + ROOT_SIZE + ROOT_SLOP;
         let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-        unsafe { allocator.deallocate(ptr::cast(p), l) };
+        unsafe { allocator.free(ptr::cast(p), l) };
         break;
       }
 
       let n = span.size + HEAD_SIZE;
       let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
       span = unsafe { ptr::as_ref(p) }.next;
-      unsafe { allocator.deallocate(ptr::cast(p), l) };
+      unsafe { allocator.free(ptr::cast(p), l) };
     }
 
     // NB: We will drop `allocator` exactly once. This call to `drop` is not
@@ -435,7 +437,7 @@ where
 
   let l = unsafe { Layout::from_size_align_unchecked(n, ALIGN_CHUNK) };
 
-  let Ok(p) = r.allocator.allocate(l) else {
+  let Ok(p) = r.allocator.alloc(l) else {
     return [E::fail(Error::ParentAllocatorFailed(l))];
   };
 
@@ -785,6 +787,32 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
+unsafe impl Allocator for Global {
+  #[inline(always)]
+  fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
+    if layout.size() == 0 {
+      return Ok(unsafe { ptr::invalid(layout.align()) });
+    }
+
+    if let Some(p) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }) {
+      return Ok(p);
+    };
+
+    return Err(AllocError);
+  }
+
+  #[inline(always)]
+  unsafe fn free(&mut self, ptr: NonNull<u8>, layout: Layout) {
+    if layout.size() == 0 {
+      return;
+    }
+
+    unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
+  }
+}
+
+/*
+
 unsafe impl<'a, A: Allocator> Allocator for ArenaCell<'a, A> {
   #[inline(always)]
   fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
@@ -807,3 +835,4 @@ unsafe impl<'a, A: Allocator> Allocator for ArenaCell<'a, A> {
     let _ = layout;
   }
 }
+*/
