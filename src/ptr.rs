@@ -1,5 +1,3 @@
-use core::mem::align_of;
-use core::mem::transmute;
 use core::ptr::NonNull;
 
 #[inline(always)]
@@ -12,7 +10,7 @@ where
 
 #[inline(always)]
 pub(crate) unsafe fn invalid<T>(addr: usize) -> NonNull<T> {
-  unsafe { NonNull::new_unchecked(transmute::<usize, *mut T>(addr)) }
+  NonNull::new_unchecked(core::mem::transmute::<usize, *mut T>(addr))
 }
 
 #[inline(always)]
@@ -25,7 +23,7 @@ pub(crate) fn addr<T>(x: NonNull<T>) -> usize {
   // Once the `strict_provenance` feature has been stabilized, this should
   // use the `addr` method on the primitive pointer type.
 
-  unsafe { transmute::<*mut T, usize>(x.as_ptr()) }
+  unsafe { core::mem::transmute::<*mut T, usize>(x.as_ptr()) }
 }
 
 #[inline(always)]
@@ -52,11 +50,6 @@ pub(crate) const unsafe fn sub<T, U>(x: NonNull<T>, y: usize) -> NonNull<U> {
 }
 
 #[inline(always)]
-pub(crate) const unsafe fn inc<T>(x: NonNull<T>) -> NonNull<T> {
-  NonNull::new_unchecked(x.as_ptr().add(1))
-}
-
-#[inline(always)]
 pub(crate) unsafe fn read<T>(x: NonNull<T>) -> T {
   x.as_ptr().read()
 }
@@ -68,8 +61,7 @@ pub(crate) unsafe fn write<T>(x: NonNull<T>, y: T) {
 
 #[inline(always)]
 pub(crate) fn as_slice<T>(x: NonNull<T>, y: usize) -> NonNull<[T]> {
-  let x = core::ptr::slice_from_raw_parts_mut(x.as_ptr(), y);
-  unsafe { NonNull::new_unchecked(x) }
+  unsafe { NonNull::new_unchecked(core::ptr::slice_from_raw_parts_mut(x.as_ptr(), y)) }
 }
 
 #[inline(always)]

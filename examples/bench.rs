@@ -1,11 +1,12 @@
 //! Run benchmarks.
 
-#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+// #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 use std::alloc::Layout;
 use std::mem::MaybeUninit;
 use std::time::Instant;
 use std::hint::black_box;
+use std::ptr::NonNull;
 
 const OUTER: usize = 10_000;
 const INNER: usize = 1000;
@@ -60,7 +61,7 @@ fn go_a_1<'a>(arena: &mut oxcart::Arena<'a>, len: &[usize; INNER], buf: &mut [Op
 }
 
 #[inline(never)]
-fn go_a_2<'a>(arena: &mut oxcart::Arena<'a>, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_a_2<'a>(arena: &mut oxcart::Arena<'a>, layout: &[Layout; INNER], buf: &mut [Option<NonNull<u8>>; INNER]) {
   for i in 0 .. INNER {
     buf[i] = Some(arena.alloc_layout(layout[i]));
   }
@@ -92,7 +93,7 @@ fn go_b_1<'a>(arena: oxcart::Arena<'a>, len: &[usize; INNER], buf: &mut [Option<
 }
 
 #[inline(never)]
-fn go_b_2<'a>(arena: oxcart::Arena<'a>, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_b_2<'a>(arena: oxcart::Arena<'a>, layout: &[Layout; INNER], buf: &mut [Option<NonNull<u8>>; INNER]) {
   let mut arena = arena;
   for i in 0 .. INNER {
     buf[i] = Some(arena.alloc_layout(layout[i]));
@@ -124,11 +125,10 @@ fn go_c_1<'a>(arena: &'a bumpalo::Bump, len: &[usize; INNER], buf: &mut [Option<
 }
 
 #[inline(never)]
-fn go_c_2<'a>(arena: &'a bumpalo::Bump, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_c_2<'a>(arena: &'a bumpalo::Bump, layout: &[Layout; INNER], buf: &mut [Option<NonNull<u8>>; INNER]) {
   for i in 0 .. INNER {
     let layout = layout[i];
-    let p = arena.alloc_layout(layout).as_ptr().cast();
-    let p = unsafe { &*std::ptr::slice_from_raw_parts(p, layout.size()) };
+    let p = arena.alloc_layout(layout);
     buf[i] = Some(p);
   }
 }
@@ -157,11 +157,10 @@ fn go_d_1<'a>(arena: &'a bump_scope::Bump, len: &[usize; INNER], buf: &mut [Opti
 }
 
 #[inline(never)]
-fn go_d_2<'a>(arena: &'a bump_scope::Bump, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_d_2<'a>(arena: &'a bump_scope::Bump, layout: &[Layout; INNER], buf: &mut [Option<NonNull<u8>>; INNER]) {
   for i in 0 .. INNER {
     let layout = layout[i];
-    let p = arena.alloc_layout(layout).as_ptr().cast();
-    let p = unsafe { &*std::ptr::slice_from_raw_parts(p, layout.size()) };
+    let p = arena.alloc_layout(layout);
     buf[i] = Some(p);
   }
 }
@@ -192,11 +191,10 @@ fn go_e_1<'a>(arena: &'a BumpScopeDownAlign8, len: &[usize; INNER], buf: &mut [O
 }
 
 #[inline(never)]
-fn go_e_2<'a>(arena: &'a BumpScopeDownAlign8, layout: &[Layout; INNER], buf: &mut [Option<&'a [MaybeUninit<u8>]>; INNER]) {
+fn go_e_2<'a>(arena: &'a BumpScopeDownAlign8, layout: &[Layout; INNER], buf: &mut [Option<NonNull<u8>>; INNER]) {
   for i in 0 .. INNER {
     let layout = layout[i];
-    let p = arena.alloc_layout(layout).as_ptr().cast();
-    let p = unsafe { &*std::ptr::slice_from_raw_parts(p, layout.size()) };
+    let p = arena.alloc_layout(layout);
     buf[i] = Some(p);
   }
 }

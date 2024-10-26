@@ -1,4 +1,8 @@
-#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
+//! TODO
+//!
+//!
+
+// #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 use std::alloc::Layout;
 use std::mem::size_of;
@@ -207,10 +211,8 @@ fn test_demo() {
   let mut arena = store.arena();
 
   let x = arena.alloc_slice(3).init_slice(|i| (i as u64) + 1);
-  let y = arena.alloc_layout(Layout::new::<[u64; 10]>());
-  let z: &mut dyn std::fmt::Debug = arena.alloc().init(13u64);
+  let y: &mut dyn std::fmt::Debug = arena.alloc().init(13u64);
 
   expect!["6"].assert_eq(&format!("{:?}", x[0] + x[1] + x[2]));
-  expect!["80"].assert_eq(&format!("{:?}", y.len()));
-  expect!["13"].assert_eq(&format!("{:?}", z));
+  expect!["13"].assert_eq(&format!("{:?}", y));
 }

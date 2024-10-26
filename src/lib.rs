@@ -4,15 +4,27 @@
 
 extern crate alloc;
 
+use allocator::Allocator;
+use allocator::Global;
 use core::alloc::Layout;
 use core::fmt;
-use core::hint::unreachable_unchecked;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::mem::align_of;
 use core::mem::needs_drop;
-use core::mem::size_of;
 use core::ptr::NonNull;
+
+/// TODO
+
+#[derive(Clone, Copy)]
+pub struct AllocError;
+
+////////////////////////////////////////////////////////////////////////////////
+//                                                                            //
+// SUBMODULES                                                                 //
+//                                                                            //
+////////////////////////////////////////////////////////////////////////////////
+
+pub mod allocator;
 
 mod ptr;
 
@@ -50,31 +62,6 @@ pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<&'a ()>);
 unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
 
 unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
-
-/// TODO: writeme
-///
-
-pub struct AllocError;
-
-/// TODO: writeme
-///
-
-pub struct Global;
-
-pub unsafe trait Allocator {
-  //! TODO: writeme
-  //!
-
-  /// TODO: writeme
-  ///
-
-  fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError>;
-
-  /// TODO: writeme
-  ///
-
-  unsafe fn free(&mut self, ptr: NonNull<u8>, layout: Layout);
-}
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -168,6 +155,11 @@ impl Fail for Panicked {
       Error::ParentAllocatorFailed(layout) =>
         alloc::alloc::handle_alloc_error(layout),
       Error::TooLarge =>
+        // The requested allocation is too large for the arena allocator to
+        // handle, even in the absence of physical constraints.
+        //
+        // In some (but not all) cases, it is not possible to construct a valid
+        // `Layout` representing the requested allocation.
         panic!("oxcart: attempted an allocation that is too large!"),
     }
   }
@@ -216,7 +208,7 @@ where
   let n = min(n, MAX_CHUNK);
   let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
 
-  let Ok(h) = allocator.alloc(l) else {
+  let Some(h) = allocator.alloc(l) else {
     return E::fail(Error::ParentAllocatorFailed(l));
   };
 
@@ -389,7 +381,7 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> Option<Span> {
   let a = layout.align();
   let s = layout.size();
 
-  if WORD - 1 & ptr::addr(p) != 0 { unreachable_unchecked(); }
+  core::hint::assert_unchecked(WORD - 1 & ptr::addr(p) == 0);
 
   let d = s + ((WORD - 1 | a - 1) & ptr::addr(p).wrapping_sub(s));
   let k = n.checked_sub(d)?;
@@ -435,9 +427,9 @@ where
       ) - 1
     );
 
-  let l = unsafe { Layout::from_size_align_unchecked(n, ALIGN_CHUNK) };
+  let l = Layout::from_size_align_unchecked(n, ALIGN_CHUNK);
 
-  let Ok(p) = r.allocator.alloc(l) else {
+  let Some(p) = r.allocator.alloc(l) else {
     return [E::fail(Error::ParentAllocatorFailed(l))];
   };
 
@@ -457,11 +449,11 @@ where
   r.last = p;
   r.used = r.used.saturating_add(n);
 
-  [Ok(unsafe { alloc_fast(span, layout).unwrap_unchecked() })]
+  [Ok(alloc_fast(span, layout).unwrap_unchecked())]
 }
 
 #[inline(always)]
-fn alloc_ptr<'a, A, E>(arena: &mut Arena<'a, A>, layout: Layout) -> Result<NonNull<u8>, E>
+fn alloc_layout<'a, A, E>(arena: &mut Arena<'a, A>, layout: Layout) -> Result<NonNull<u8>, E>
 where
   A: Allocator,
   E: Fail,
@@ -486,7 +478,7 @@ where
   A: Allocator,
   E: Fail,
 {
-  let x = alloc_ptr(arena, Layout::new::<T>())?;
+  let x = alloc_layout(arena, Layout::new::<T>())?;
   Ok(Slot(ptr::cast(x), PhantomData))
 }
 
@@ -501,7 +493,7 @@ where
   }
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = alloc_ptr(arena, l)?;
+  let x = alloc_layout(arena, l)?;
   Ok(Slot(ptr::as_slice(ptr::cast(x), len), PhantomData))
 }
 
@@ -512,7 +504,7 @@ where
   E: Fail,
   T: Copy,
 {
-  let x = alloc_ptr(arena, Layout::for_value(src))?;
+  let x = alloc_layout(arena, Layout::for_value(src))?;
   let x = ptr::cast(x);
   let y = ptr::cast(ptr::from_ref(src));
   let n = src.len();
@@ -528,16 +520,6 @@ where
 {
   let x = copy_slice(arena, src.as_bytes())?;
   Ok(unsafe { core::str::from_utf8_unchecked_mut(x) })
-}
-
-#[inline(always)]
-fn alloc_layout<'a, A, E>(arena: &mut Arena<'a, A>, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  let x = alloc_ptr(arena, layout)?;
-  Ok(unsafe { ptr::as_slice_mut_ref(ptr::cast(x), layout.size()) })
 }
 
 impl<'a, A: Allocator> Arena<'a, A> {
@@ -635,25 +617,27 @@ impl<'a, A: Allocator> Arena<'a, A> {
     copy_str(self, src)
   }
 
-  /// Allocates memory for the given layout.
+  /// Allocates memory for the given layout. The memory is valid for the
+  /// lifetime `'a` from `Arena<'a>`.
   ///
   /// # Panics
   ///
   /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn alloc_layout(&mut self, layout: Layout) -> &'a mut [MaybeUninit<u8>] {
+  pub fn alloc_layout(&mut self, layout: Layout) -> NonNull<u8> {
     unwrap(alloc_layout(self, layout))
   }
 
-  /// Allocates memory for the given layout.
+  /// Allocates memory for the given layout. The memory is valid for the
+  /// lifetime `'a` from `Arena<'a>`.
   ///
   /// # Errors
   ///
   /// An error is returned on failure to allocate memory.
 
   #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<&'a mut [MaybeUninit<u8>], AllocError> {
+  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
     alloc_layout(self, layout)
   }
 }
@@ -725,7 +709,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
     while i < N {
       unsafe { ptr::write(x, f(i)) };
       i = i + 1;
-      x = unsafe { ptr::inc(x) };
+      x = unsafe { ptr::add(x, size_of::<T>()) };
     }
 
     unsafe { ptr::as_mut_ref(self.0) }
@@ -768,7 +752,7 @@ impl<'a, T> Slot<'a, [T]> {
     while i < self.0.len() {
       unsafe { ptr::write(x, f(i)) };
       i = i + 1;
-      x = unsafe { ptr::inc(x) };
+      x = unsafe { ptr::add(x, size_of::<T>()) };
     }
 
     unsafe { ptr::as_mut_ref(self.0) }
@@ -787,52 +771,18 @@ impl<'a, T> fmt::Debug for Slot<'a, T> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-unsafe impl Allocator for Global {
+unsafe impl<'a, A: Allocator> Allocator for Arena<'a, A> {
   #[inline(always)]
-  fn alloc(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-    if layout.size() == 0 {
-      return Ok(unsafe { ptr::invalid(layout.align()) });
+  fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
+    match alloc_layout::<_, AllocError>(self, layout) {
+      Ok(p) => Some(p),
+      Err(_) => None,
     }
-
-    if let Some(p) = NonNull::new(unsafe { alloc::alloc::alloc(layout) }) {
-      return Ok(p);
-    };
-
-    return Err(AllocError);
   }
 
   #[inline(always)]
   unsafe fn free(&mut self, ptr: NonNull<u8>, layout: Layout) {
-    if layout.size() == 0 {
-      return;
-    }
-
-    unsafe { alloc::alloc::dealloc(ptr.as_ptr(), layout) };
-  }
-}
-
-/*
-
-unsafe impl<'a, A: Allocator> Allocator for ArenaCell<'a, A> {
-  #[inline(always)]
-  fn allocate(&self, layout: Layout) -> Result<NonNull<[u8]>, AllocError> {
-    // SAFETY:
-    //
-    // The lifetime of the `&mut Arena<'a>` does not overlap with the lifetime
-    // of any other reference to the arena.
-    //
-    // In particular, it is not possible for the global allocator to access
-    // this allocator.
-
-    let x = alloc_ptr(unsafe { &mut *self.0.get() }, layout)?;
-    Ok(ptr::as_slice(x, layout.size()))
-  }
-
-  #[inline(always)]
-  unsafe fn deallocate(&self, ptr: NonNull<u8>, layout: Layout) {
-    let _ = self;
     let _ = ptr;
     let _ = layout;
   }
 }
-*/

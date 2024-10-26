@@ -8,15 +8,16 @@ name = "oxcart"
 version = "0.1.0"
 
 [dependencies]
-allocator-api2 = { version = "0.2.16", default-features = false, features = ["alloc"] }
+# allocator-api2 = { version = "0.2.16", default-features = false, features = ["alloc"] }
 
 [dev-dependencies]
+allocator-api2 = { version = "0.2.16", default-features = false, features = ["alloc"] }
 bump-scope = "0.1.8"
 bumpalo = "3.16.0"
 expect-test = "1.5.0"
 
 [features]
-allocator_api = ["allocator-api2/nightly"]
+allocator_api = []
 
 [lints.rust]
 elided_lifetimes_in_paths = "warn"
