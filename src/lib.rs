@@ -4,14 +4,13 @@
 
 extern crate alloc;
 
-use allocator::Allocator;
-use allocator::Global;
+use allocator_api::Allocator;
+use allocator_api::Global;
 use core::alloc::Layout;
-use core::fmt;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
-use core::mem::needs_drop;
 use core::ptr::NonNull;
+use pop::ptr;
 
 /// TODO
 
@@ -24,9 +23,9 @@ pub struct AllocError;
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub mod allocator;
+pub mod allocator_api;
 
-mod ptr;
+mod foo;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -37,20 +36,12 @@ mod ptr;
 /// TODO: writeme
 ///
 
-pub struct Store<A: Allocator = Global>(NonNull<Root<A>>);
-
-unsafe impl<A: Allocator> Send for Store<A> where A: Send { }
-
-unsafe impl<A: Allocator> Sync for Store<A> where A: Sync { }
+pub struct Store<A: Allocator = Global>(ptr, PhantomData<A>);
 
 /// TODO: writeme
 ///
 
 pub struct Arena<'a, A: Allocator = Global>(Span, PhantomData<(&'a (), A)>);
-
-unsafe impl<'a, A: Allocator> Send for Arena<'a, A> where A: Send { }
-
-unsafe impl<'a, A: Allocator> Sync for Arena<'a, A> where A: Sync { }
 
 /// Uninitialized memory with lifetime `'a` which can hold a `T`.
 ///
@@ -71,20 +62,20 @@ unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
 
 #[derive(Clone, Copy)]
 struct Span {
-  tail: NonNull<u8>,
+  tail: ptr,
   size: usize,
 }
 
 struct Root<A> {
-  head: NonNull<Head<A>>,
-  last: NonNull<Head<A>>,
+  head: NonNull<Head>,
+  last: NonNull<Head>,
   used: usize,
   allocator: A,
 }
 
-struct Head<A> {
+struct Head {
   next: Span,
-  root: NonNull<Root<A>>,
+  root: ptr,
 }
 
 enum Error {
@@ -180,7 +171,7 @@ impl Fail for AllocError {
 
 impl Span {
   #[inline(always)]
-  fn new(tail: NonNull<u8>, size: usize) -> Self {
+  fn new(tail: ptr, size: usize) -> Self {
     Self { tail, size, }
   }
 }
@@ -196,8 +187,8 @@ where
   A: Allocator,
   E: Fail,
 {
-  let CHUNK_ALIGN = const { max(WORD, align_of::<Head<A>>()) };
-  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head<A>>() };
+  let CHUNK_ALIGN = const { max(WORD, align_of::<Head>()) };
+  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
   let ROOT_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Root<A>>() };
   let ROOT_SLOP = const { ! (WORD - 1) & align_of::<Root<A>>() - 1 };
 
@@ -212,9 +203,9 @@ where
     return E::fail(Error::ParentAllocatorFailed(l));
   };
 
-  let h = ptr::cast(h);
-  let t = unsafe { ptr::add(h, n - (ROOT_SIZE + ROOT_SLOP)) };
-  let r = unsafe { ptr::align_up(t) };
+  let h = foo::cast(h);
+  let t = unsafe { foo::add::<_, u8>(h, n - (ROOT_SIZE + ROOT_SLOP)) };
+  let r = unsafe { foo::align_up(t) };
 
   let root = Root {
     head: h,
@@ -224,14 +215,14 @@ where
   };
 
   let head = Head {
-    next: Span::new(t, n - (HEAD_SIZE + ROOT_SIZE + ROOT_SLOP)),
-    root: r,
+    next: Span::new(ptr::from(t), n - (HEAD_SIZE + ROOT_SIZE + ROOT_SLOP)),
+    root: ptr::from(r),
   };
 
-  unsafe { ptr::write(h, head) };
-  unsafe { ptr::write(r, root) };
+  unsafe { foo::write(h, head) };
+  unsafe { foo::write(r, root) };
 
-  Ok(Store(r))
+  Ok(Store(ptr::from(r), PhantomData))
 }
 
 impl Store<Global> {
@@ -313,47 +304,47 @@ impl<A: Allocator> Store<A> {
   ///
 
   pub fn arena(&mut self) -> Arena<'_, A> {
-    let r = unsafe { ptr::as_mut_ref(self.0) };
+    let r = unsafe { self.0.as_mut_ref::<Root<A>>() };
     r.last = r.head;
-    let h = unsafe { ptr::as_ref(r.head) };
+    let h = unsafe { foo::as_ref(r.head) };
     Arena(h.next, PhantomData)
   }
 
   /// A reference to the parent allocator.
 
   pub fn allocator(&self) -> &A {
-    let r = unsafe { ptr::as_ref(self.0) };
+    let r = unsafe { self.0.as_ref::<Root<A>>() };
     &r.allocator
   }
 }
 
 impl<A: Allocator> Drop for Store<A> {
   fn drop(&mut self) {
-    let CHUNK_ALIGN = const { max(WORD, align_of::<Head<A>>()) };
-    let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head<A>>() };
+    let CHUNK_ALIGN = const { max(WORD, align_of::<Head>()) };
+    let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
     let ROOT_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Root<A>>() };
     let ROOT_SLOP = const { ! (WORD - 1) & align_of::<Root<A>>() - 1 };
 
-    let root = unsafe { ptr::as_ref(self.0) };
+    let root = unsafe { self.0.as_ref::<Root<A>>() };
     let last = root.head;
-    let mut span = unsafe { ptr::as_ref(last) }.next;
+    let mut span = unsafe { foo::as_ref(last) }.next;
 
-    let mut allocator = unsafe { ptr::read(ptr::from_ref(&root.allocator)) };
+    let mut allocator = unsafe { foo::read(foo::from_ref(&root.allocator)) };
 
     loop {
-      let p = unsafe { ptr::sub(span.tail, span.size + HEAD_SIZE) };
+      let p = span.tail - (span.size + HEAD_SIZE);
 
-      if p == last {
+      if p == ptr::from(last) {
         let n = span.size + HEAD_SIZE + ROOT_SIZE + ROOT_SLOP;
         let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-        unsafe { allocator.free(ptr::cast(p), l) };
+        unsafe { allocator.free(p.as_non_null(), l) };
         break;
       }
 
       let n = span.size + HEAD_SIZE;
       let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-      span = unsafe { ptr::as_ref(p) }.next;
-      unsafe { allocator.free(ptr::cast(p), l) };
+      span = unsafe { p.as_ref::<Head>() }.next;
+      unsafe { allocator.free(p.as_non_null(), l) };
     }
 
     // NB: We will drop `allocator` exactly once. This call to `drop` is not
@@ -362,8 +353,8 @@ impl<A: Allocator> Drop for Store<A> {
   }
 }
 
-impl<A: Allocator> fmt::Debug for Store<A> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<A: Allocator> core::fmt::Debug for Store<A> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_tuple("Store").finish()
   }
 }
@@ -381,12 +372,12 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> Option<Span> {
   let a = layout.align();
   let s = layout.size();
 
-  core::hint::assert_unchecked(WORD - 1 & ptr::addr(p) == 0);
+  core::hint::assert_unchecked(p.addr() & WORD - 1 == 0);
 
-  let d = s + ((WORD - 1 | a - 1) & ptr::addr(p).wrapping_sub(s));
+  let d = s + ((WORD - 1 | a - 1) & p.addr().wrapping_sub(s));
   let k = n.checked_sub(d)?;
 
-  Some(Span::new(ptr::sub(p, d), k))
+  Some(Span::new(p - d, k))
 }
 
 #[inline(never)]
@@ -396,13 +387,13 @@ where
   A: Allocator,
   E: Fail,
 {
-  let ALIGN_CHUNK = const { max(WORD, align_of::<Head<A>>()) };
-  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head<A>>() };
+  let ALIGN_CHUNK = const { max(WORD, align_of::<Head>()) };
+  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
 
-  let h: &Head<A> = ptr::as_ref(ptr::sub(span.tail, span.size + HEAD_SIZE));
-  let r = ptr::as_mut_ref(h.root);
+  let h = (span.tail - (span.size + HEAD_SIZE)).as_ref::<Head>();
+  let r = h.root.as_mut_ref::<Root<A>>();
 
-  if ptr::from_ref(h) != r.last {
+  if foo::from_ref(h) != r.last {
     if let Some(s) = alloc_fast(h.next, layout) {
       return [Ok(s)];
     }
@@ -412,7 +403,7 @@ where
     return [E::fail(Error::TooLarge)];
   }
 
-  let h = ptr::as_mut_ref(r.head);
+  let h = foo::as_mut_ref(r.head);
 
   let n =
     1 << BITS - clz(
@@ -433,17 +424,17 @@ where
     return [E::fail(Error::ParentAllocatorFailed(l))];
   };
 
-  let p = ptr::cast(p);
-  let t = ptr::add(p, n);
+  let p = foo::cast(p);
+  let t = foo::add::<_, u8>(p, n);
 
   let head = Head {
     next: h.next,
     root: h.root,
   };
 
-  ptr::write(p, head);
+  foo::write(p, head);
 
-  let span = Span::new(t, n - HEAD_SIZE);
+  let span = Span::new(ptr::from(t), n - HEAD_SIZE);
 
   h.next = span;
   r.last = p;
@@ -469,7 +460,7 @@ where
         },
     };
   arena.0 = s;
-  Ok(s.tail)
+  Ok(unsafe { s.tail.as_non_null() })
 }
 
 #[inline(always)]
@@ -479,7 +470,7 @@ where
   E: Fail,
 {
   let x = alloc_layout(arena, Layout::new::<T>())?;
-  Ok(Slot(ptr::cast(x), PhantomData))
+  Ok(Slot(foo::cast(x), PhantomData))
 }
 
 #[inline(always)]
@@ -494,7 +485,7 @@ where
 
   let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
   let x = alloc_layout(arena, l)?;
-  Ok(Slot(ptr::as_slice(ptr::cast(x), len), PhantomData))
+  Ok(Slot(foo::as_slice(foo::cast(x), len), PhantomData))
 }
 
 #[inline(always)]
@@ -505,11 +496,11 @@ where
   T: Copy,
 {
   let x = alloc_layout(arena, Layout::for_value(src))?;
-  let x = ptr::cast(x);
-  let y = ptr::cast(ptr::from_ref(src));
+  let x = foo::cast(x);
+  let y = foo::cast(foo::from_ref(src));
   let n = src.len();
-  unsafe { ptr::copy_nonoverlapping::<T>(y, x, n) };
-  Ok(unsafe { ptr::as_slice_mut_ref(x, n) })
+  unsafe { foo::copy_nonoverlapping::<T>(y, x, n) };
+  Ok(unsafe { foo::as_slice_mut_ref(x, n) })
 }
 
 #[inline(always)]
@@ -642,8 +633,8 @@ impl<'a, A: Allocator> Arena<'a, A> {
   }
 }
 
-impl<'a, A: Allocator> fmt::Debug for Arena<'a, A> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'a, A: Allocator> core::fmt::Debug for Arena<'a, A> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_tuple("Arena")
       .field(&self.0.tail)
       .field(&self.0.size)
@@ -657,12 +648,19 @@ impl<'a, A: Allocator> fmt::Debug for Arena<'a, A> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
+impl<'a, T: ?Sized> Slot<'a, T> {
+  #[inline(always)]
+  fn ptr(&self) -> ptr {
+    ptr::from(self.0)
+  }
+}
+
 impl<'a, T> Slot<'a, T> {
   /// Converts the slot into a reference to an uninitialized value.
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    unsafe { ptr::as_mut_ref(ptr::cast(self.0)) }
+    unsafe { self.ptr().as_mut_ref() }
   }
 
   /// Initializes the slot with the given value.
@@ -673,10 +671,10 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
-    assert!(! needs_drop::<T>());
+    assert!(! core::mem::needs_drop::<T>());
 
-    unsafe { ptr::write(self.0, value) };
-    unsafe { ptr::as_mut_ref(self.0) }
+    unsafe { self.ptr().write(value) };
+    unsafe { self.ptr().as_mut_ref() }
   }
 }
 
@@ -685,7 +683,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    unsafe { ptr::as_mut_ref(ptr::cast(self.0)) }
+    unsafe { self.ptr().as_mut_ref() }
   }
 
   /// Initializes the array with values produced by calling the given function
@@ -700,19 +698,19 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   where
     F: FnMut(usize) -> T
   {
-    assert!(! needs_drop::<T>());
+    assert!(! core::mem::needs_drop::<T>());
 
-    let mut x = ptr::cast(self.0);
+    let mut p = self.ptr();
     let mut i = 0;
     let mut f = f;
 
     while i < N {
-      unsafe { ptr::write(x, f(i)) };
+      unsafe { p.write(f(i)) };
       i = i + 1;
-      x = unsafe { ptr::add(x, size_of::<T>()) };
+      p = p + size_of::<T>();
     }
 
-    unsafe { ptr::as_mut_ref(self.0) }
+    unsafe { self.ptr().as_mut_ref() }
   }
 }
 
@@ -728,7 +726,7 @@ impl<'a, T> Slot<'a, [T]> {
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    unsafe { ptr::as_slice_mut_ref(ptr::cast(self.0), self.0.len()) }
+    unsafe { self.ptr().as_slice_mut_ref(self.len()) }
   }
 
   /// Initializes the slice with values produced by calling the given function
@@ -743,24 +741,24 @@ impl<'a, T> Slot<'a, [T]> {
   where
     F: FnMut(usize) -> T
   {
-    assert!(! needs_drop::<T>());
+    assert!(! core::mem::needs_drop::<T>());
 
-    let mut x = ptr::cast(self.0);
+    let mut p = self.ptr();
     let mut i = 0;
     let mut f = f;
 
-    while i < self.0.len() {
-      unsafe { ptr::write(x, f(i)) };
+    while i < self.len() {
+      unsafe { p.write(f(i)) };
       i = i + 1;
-      x = unsafe { ptr::add(x, size_of::<T>()) };
+      p = p + size_of::<T>();
     }
 
-    unsafe { ptr::as_mut_ref(self.0) }
+    unsafe { self.ptr().as_slice_mut_ref(self.len()) }
   }
 }
 
-impl<'a, T> fmt::Debug for Slot<'a, T> {
-  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl<'a, T> core::fmt::Debug for Slot<'a, T> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_tuple("Slot").field(&self.0).finish()
   }
 }

@@ -3,7 +3,7 @@
 
 use core::alloc::Layout;
 use core::ptr::NonNull;
-use crate::ptr;
+use pop::ptr;
 
 pub unsafe trait Allocator {
   //! TODO: writeme
@@ -30,7 +30,7 @@ unsafe impl Allocator for Global {
   #[inline(always)]
   fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
     if layout.size() == 0 {
-      return Some(unsafe { ptr::invalid(layout.align()) });
+      return Some(unsafe { ptr::invalid(layout.align()).as_non_null() });
     }
 
     return NonNull::new(unsafe { alloc::alloc::alloc(layout) });
