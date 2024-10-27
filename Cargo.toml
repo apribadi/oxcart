@@ -9,6 +9,7 @@ version = "0.1.0"
 
 [dependencies]
 # allocator-api2 = { version = "0.2.16", default-features = false, features = ["alloc"] }
+pop = { git = "https://github.com/apribadi/pop.git" }
 
 [dev-dependencies]
 allocator-api2 = { version = "0.2.16", default-features = false, features = ["alloc"] }
