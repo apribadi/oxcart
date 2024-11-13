@@ -128,6 +128,7 @@ fn test_too_large_allocation() {
 fn test_growth() {
   let mut store = Store::with_capacity(64);
   let mut arena = store.arena();
+
   let _ = arena.alloc().init(1_u8);
   let _ = arena.alloc().init(1_u16);
   let _ = arena.alloc().init(1_u32);

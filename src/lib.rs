@@ -15,7 +15,7 @@ use pop::ptr;
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-/// A `Store` owns the memory backing an arena allocator.
+/// A `Store` owns the memory reserved for an arena allocator.
 ///
 /// The memory is released to the global allocator when the `Store` is dropped.
 
@@ -23,7 +23,8 @@ pub struct Store {
   root: ptr
 }
 
-/// An `Arena<'a>` is used to allocate memory with lifetime `'a`.
+/// An `Arena<'a>` is a high performance memory allocator that allocates memory
+/// regions with lifetime `'a`.
 
 pub struct Arena<'a> {
   span: Span,
@@ -31,7 +32,7 @@ pub struct Arena<'a> {
 }
 
 /// A `Slot<'a, T>` refers to uninitialized memory with lifetime `'a` which can
-/// hold a `T`.
+/// contain a `T`.
 ///
 /// Typically you will initialize a slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
@@ -177,6 +178,11 @@ impl Store {
   ///
   /// The allocations from that arena will have a lifetime bounded by the
   /// lifetime of this `&'a mut self` reference.
+  ///
+  /// # Panics
+  ///
+  /// Panics if the underlying global memory allocator fails to deallocate or
+  /// allocate memory.
 
   pub fn arena<'a>(&'a mut self) -> Arena<'a> {
     if self.root.is_null() {
@@ -286,14 +292,6 @@ impl Drop for Store {
   }
 }
 
-/*
-impl core::fmt::Debug for Store {
-  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Store").field(&self.root).finish()
-  }
-}
-*/
-
 impl core::fmt::Debug for Store {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut slab = self.root;
@@ -377,7 +375,7 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
   head.next = p;
 
   let span = Span { tail: p + size, size: size - size_of::<Head>() };
-  let span = alloc_fast(span, layout).0;
+  let span = alloc_fast(span, layout).0; // Must succeed.
 
   *span_out = span;
 }
@@ -385,9 +383,8 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 impl<'a> Arena<'a> {
   #[inline(always)]
   fn alloc_internal(&mut self, layout: Layout) -> ptr {
-    let span = self.span;
     let span =
-      match unsafe { alloc_fast(span, layout) } {
+      match unsafe { alloc_fast(self.span, layout) } {
         (span, true) => span,
         (span, false) => {
           let mut span = span;
@@ -437,10 +434,7 @@ impl<'a> Arena<'a> {
   /// Panics on failure to allocate memory.
 
   #[inline(always)]
-  pub fn copy_slice<T>(&mut self, src: &[T]) -> &'a mut [T]
-  where
-    T: Copy
-  {
+  pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
     let x = self.alloc_internal(Layout::for_value(src));
     let n = src.len();
     unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, n) };
@@ -475,10 +469,7 @@ impl<'a> Arena<'a> {
 
 impl<'a> core::fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Arena")
-      .field(&self.span.tail)
-      .field(&self.span.size)
-      .finish()
+    f.debug_tuple("Arena").field(&self.span.size).finish()
   }
 }
 
@@ -599,12 +590,12 @@ impl<'a, T> Slot<'a, [T]> {
 
 impl<'a, T> core::fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Slot").field(&self.ptr()).finish()
+    f.debug_tuple("Slot").finish()
   }
 }
 
 impl<'a, T> core::fmt::Debug for Slot<'a, [T]> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Slot").field(&self.ptr()).field(&self.len()).finish()
+    f.debug_tuple("Slot").field(&self.len()).finish()
   }
 }
