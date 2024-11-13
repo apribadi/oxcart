@@ -1,6 +1,4 @@
-//! TODO
-//!
-//!
+//! tests for oxcart
 
 use std::alloc::Layout;
 use oxcart::Arena;
@@ -18,8 +16,8 @@ fn test_api() {
   let _ = Store::with_capacity(0);
   let _ = format!("{:?}", store);
   let mut arena = store.arena();
-  let _ = arena.alloc::<u64>();
-  let _ = arena.alloc_slice::<u64>(3);
+  let x = arena.alloc::<u64>();
+  let y = arena.alloc_slice::<u64>(3);
   let _ = arena.copy_slice::<u64>(&[0, 1, 2]);
   let _ = arena.copy_str("hello");
   let _ = arena.alloc_layout(Layout::new::<u64>());
@@ -31,6 +29,10 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
+
+  expect!["Arena(65328)"].assert_eq(&format!("{:?}", arena)); // NB: arch dependent
+  expect!["Slot"].assert_eq(&format!("{:?}", x));
+  expect!["Slot(3)"].assert_eq(&format!("{:?}", y));
   expect!["Store([65536])"].assert_eq(&format!("{:?}", store));
 }
 
@@ -143,8 +145,13 @@ fn test_growth() {
   let _ = arena.alloc().init([1_u8; 7]);
   let _ = arena.alloc().init([1_u8; 9]);
   let _ = arena.alloc().init([1_u8; 1000]);
+
+  expect!["Arena(8)"].assert_eq(&format!("{:?}", arena));
   expect!["Store([64, 64, 128, 1024])"].assert_eq(&format!("{:?}", store));
-  let _ = store.arena();
+
+  let arena = store.arena();
+
+  expect!["Arena(2032)"].assert_eq(&format!("{:?}", arena));
   expect!["Store([2048])"].assert_eq(&format!("{:?}", store));
 }
 
