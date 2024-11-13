@@ -327,9 +327,8 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
   core::hint::assert_unchecked(p.addr() & QUANTUM - 1 == 0);
 
   let d = s + (p.addr().wrapping_sub(s) & (a - 1 | QUANTUM - 1));
-  let k = n.wrapping_sub(d);
 
-  (Span { tail: p - d, size: k }, d <= n)
+  (Span { tail: p - d, size: n.wrapping_sub(d) }, d <= n)
 }
 
 #[inline(never)]
