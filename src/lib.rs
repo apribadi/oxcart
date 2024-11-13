@@ -1,49 +1,37 @@
 #![doc = include_str!("../README.md")]
 #![no_std]
-#![cfg_attr(feature = "allocator_api", feature(allocator_api))]
 
 extern crate alloc;
 
-use allocator_api::Allocator;
-use allocator_api::Global;
 use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
 use pop::ptr;
 
-/// TODO
-
-#[derive(Clone, Copy)]
-pub struct AllocError;
-
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-// SUBMODULES                                                                 //
+// PUBLIC TYPE DEFINITIONS                                                    //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-pub mod allocator_api;
-
-mod foo;
-
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-// PUBLIC TYPE AND TRAIT DEFINITIONS                                          //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
-
-/// TODO: writeme
+/// A `Store` owns the memory backing an arena allocator.
 ///
+/// The memory is released to the global allocator when the `Store` is dropped.
 
-pub struct Store<A: Allocator = Global>(ptr, PhantomData<A>);
+pub struct Store {
+  root: ptr
+}
 
-/// TODO: writeme
-///
+/// An `Arena<'a>` is used to allocate memory with lifetime `'a`.
 
-pub struct Arena<'a, A: Allocator = Global>(Span, PhantomData<(&'a (), A)>);
+pub struct Arena<'a> {
+  span: Span,
+  _phantom_data: PhantomData<&'a ()>
+}
 
-/// Uninitialized memory with lifetime `'a` which can hold a `T`.
+/// A `Slot<'a, T>` refers to uninitialized memory with lifetime `'a` which can
+/// hold a `T`.
 ///
 /// Typically you will initialize a slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
@@ -54,39 +42,25 @@ unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
 
 unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
 
+impl <'a, T: ?Sized> core::panic::UnwindSafe for Slot<'a, T> { }
+
+impl <'a, T: ?Sized> core::panic::RefUnwindSafe for Slot<'a, T> { }
+
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-// PRIVATE TYPE AND TRAIT DEFINITIONS                                         //
+// PRIVATE TYPE                                                               //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
+
+struct Head {
+  next: ptr,
+  size: usize,
+}
 
 #[derive(Clone, Copy)]
 struct Span {
   tail: ptr,
   size: usize,
-}
-
-struct Root<A> {
-  head: NonNull<Head>,
-  last: NonNull<Head>,
-  used: usize,
-  allocator: A,
-}
-
-struct Head {
-  next: Span,
-  root: ptr,
-}
-
-enum Error {
-  ParentAllocatorFailed(Layout),
-  TooLarge,
-}
-
-enum Panicked { }
-
-trait Fail: Sized {
-  fn fail<T>(_: Error) -> Result<T, Self>;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -95,16 +69,24 @@ trait Fail: Sized {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-const BITS: usize = usize::BITS as usize;
-const WORD: usize = size_of::<usize>();
+// We allocate from an arena in multiples of `QUANTUM`.
+//
+// We require the two facts
+//
+// - align_of::<Head>() <= QUANTUM
+// - size_of::<Head>() % QUANTUM == 0
+//
+// and this definition of QUANTUM guarantees them.
 
-const DEFAULT_CAPACITY: usize = 1 << 16; // 65536
+const QUANTUM: usize = align_of::<Head>();
 
-const MAX_CHUNK: usize = 1 << BITS - 2; // 0b01000...0
-const MAX_ALLOC: usize = 1 << BITS - 3; // 0b00100...0
-const MAX_ALIGN: usize = 1 << BITS - 4; // 0b00010...0
+const BITS: u32 = usize::BITS;
 
-const _: () = assert!(WORD.is_power_of_two());
+// We limit the total capacity of an arena to `MAX_SIZE`.
+//
+// It is the largest power of two that is a valid layout size.
+
+const MAX_SIZE: usize = 1 << BITS - 2;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -113,67 +95,51 @@ const _: () = assert!(WORD.is_power_of_two());
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-const fn max(x: usize, y: usize) -> usize {
-  if x >= y { x } else { y }
+fn clz(x: usize) -> u32 {
+  x.leading_zeros()
 }
 
 #[inline(always)]
-const fn min(x: usize, y: usize) -> usize {
+fn min(x: usize, y: usize) -> usize {
   if x <= y { x } else { y }
 }
 
 #[inline(always)]
-const fn clz(x: usize) -> usize {
-  x.leading_zeros() as usize
+fn max(x: usize, y: usize) -> usize {
+  if x >= y { x } else { y }
 }
 
-#[inline(always)]
-fn unwrap<T>(x: Result<T, Panicked>) -> T {
-  match x { Ok(x) => x, Err(e) => match e { } }
-}
+// SAFETY
+//
+// - A `Layout` with this `size` and `align` must be valid.
+// - The `size` must be non-zero.
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-// Fail                                                                       //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+unsafe fn global_alloc(size: usize, align: usize) -> ptr {
+  debug_assert!(Layout::from_size_align(size, align).is_ok());
+  debug_assert!(size != 0);
 
-impl Fail for Panicked {
-  #[inline(never)]
-  #[cold]
-  fn fail<T>(e: Error) -> Result<T, Self> {
-    match e {
-      Error::ParentAllocatorFailed(layout) =>
-        alloc::alloc::handle_alloc_error(layout),
-      Error::TooLarge =>
-        // The requested allocation is too large for the arena allocator to
-        // handle, even in the absence of physical constraints.
-        //
-        // In some (but not all) cases, it is not possible to construct a valid
-        // `Layout` representing the requested allocation.
-        panic!("oxcart: attempted an allocation that is too large!"),
-    }
+  let layout = Layout::from_size_align_unchecked(size, align);
+  let p = alloc::alloc::alloc(layout);
+  let p = ptr::from(p);
+
+  if p.is_null() {
+    panic!("oxcart: Allocating from the global allocator failed!")
   }
+
+  p
 }
 
-impl Fail for AllocError {
-  #[inline(always)]
-  fn fail<T>(_: Error) -> Result<T, Self> {
-    Err(AllocError)
-  }
-}
+// SAFETY
+//
+// - The pointer `p` must refer to a currently allocated region that was
+//   allocated with this `size` and `align`.
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-// Span                                                                       //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
+unsafe fn global_free(p: ptr, size: usize, align: usize) {
+  debug_assert!(Layout::from_size_align(size, align).is_ok());
 
-impl Span {
-  #[inline(always)]
-  fn new(tail: ptr, size: usize) -> Self {
-    Self { tail, size, }
-  }
+  let layout = Layout::from_size_align_unchecked(size, align);
+  let p = p.as_mut_ptr();
+  alloc::alloc::dealloc(p, layout);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -182,180 +148,168 @@ impl Span {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-fn store<A, E>(capacity: usize, allocator: A) -> Result<Store<A>, E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  let CHUNK_ALIGN = const { max(WORD, align_of::<Head>()) };
-  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
-  let ROOT_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Root<A>>() };
-  let ROOT_SLOP = const { ! (WORD - 1) & align_of::<Root<A>>() - 1 };
+impl Store {
+  /// Creates a new empty store.
 
-  let mut allocator = allocator;
-
-  let n = ! (WORD - 1) & capacity;
-  let n = max(n, HEAD_SIZE + ROOT_SIZE + ROOT_SLOP);
-  let n = min(n, MAX_CHUNK);
-  let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-
-  let Some(h) = allocator.alloc(l) else {
-    return E::fail(Error::ParentAllocatorFailed(l));
-  };
-
-  let h = foo::cast(h);
-  let t = unsafe { foo::add::<_, u8>(h, n - (ROOT_SIZE + ROOT_SLOP)) };
-  let r = unsafe { foo::align_up(t) };
-
-  let root = Root {
-    head: h,
-    last: h,
-    used: n,
-    allocator,
-  };
-
-  let head = Head {
-    next: Span::new(ptr::from(t), n - (HEAD_SIZE + ROOT_SIZE + ROOT_SLOP)),
-    root: ptr::from(r),
-  };
-
-  unsafe { foo::write(h, head) };
-  unsafe { foo::write(r, root) };
-
-  Ok(Store(ptr::from(r), PhantomData))
-}
-
-impl Store<Global> {
-  /// Allocates a new store with the default capacity backed by the global
-  /// allocator.
-  ///
-  /// # Panics
-  ///
-  /// Panics on failure to allocate memory.
-
-  pub fn new() -> Self {
-    unwrap(store(DEFAULT_CAPACITY, Global))
+  pub const fn new() -> Self {
+    Store { root: ptr::NULL }
   }
 
-  /// Allocates a new store with the default capacity backed by the global
-  /// allocator.
+  /// Creates a new store and pre-allocates approximately `size` memory.
   ///
-  /// # Errors
+  /// The `size` parameter is purely advisory, and guarentees neither
   ///
-  /// An error is returned on failure to allocate memory.
+  /// - a lower bound on a set of allocations that can be made without
+  ///   requesting additional memory from the global allocator, nor
+  ///
+  /// - an upper bound on the amount of memory requested from the global
+  ///   allocator.
 
-  pub fn try_new() -> Result<Self, AllocError> {
-    store(DEFAULT_CAPACITY, Global)
+  pub fn with_capacity(size: usize) -> Self {
+    let size = min(max(size, size_of::<Head>() + 1), MAX_SIZE);
+    let size = 1 << BITS - clz(size - 1);
+    let root = unsafe { global_alloc(size, QUANTUM) };
+    unsafe { root.write(Head { next: ptr::NULL, size }) };
+    Store { root }
   }
 
-  /// Allocates a new store with the given capacity backed by the global
-  /// allocator.
+  /// Prepares an arena.
   ///
-  /// # Panics
-  ///
-  /// Panics on failure to allocate memory.
+  /// The allocations from that arena will have a lifetime bounded by the
+  /// lifetime of this `&'a mut self` reference.
 
-  pub fn with_capacity(capacity: usize) -> Self {
-    unwrap(store(capacity, Global))
-  }
+  pub fn arena<'a>(&'a mut self) -> Arena<'a> {
+    if self.root.is_null() {
+      // CASE 1: Zero slabs.
 
-  /// Allocates a new store with the given capacity backed by the global
-  /// allocator.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
+      const SIZE: usize = 1 << 16;
 
-  pub fn try_with_capacity(capacity: usize) -> Result<Self, AllocError> {
-    store(capacity, Global)
-  }
-}
+      let root = unsafe { global_alloc(SIZE, QUANTUM) };
 
-impl<A: Allocator> Store<A> {
-  /// TODO: writeme
-  ///
+      unsafe { root.write(Head { next: ptr::NULL, size: SIZE }) };
 
-  pub fn new_in(allocator: A) -> Self {
-    unwrap(store(DEFAULT_CAPACITY, allocator))
-  }
+      self.root = root;
 
-  /// TODO: writeme
-  ///
-
-  pub fn try_new_in(allocator: A) -> Result<Self, AllocError> {
-    store(DEFAULT_CAPACITY, allocator)
-  }
-
-  /// TODO: writeme
-  ///
-
-  pub fn with_capacity_in(capacity: usize, allocator: A) -> Self {
-    unwrap(store(capacity, allocator))
-  }
-
-  /// TODO: writeme
-  ///
-
-  pub fn try_with_capacity_in(capacity: usize, allocator: A) -> Result<Self, AllocError> {
-    store(capacity, allocator)
-  }
-
-  /// TODO: writeme
-  ///
-
-  pub fn arena(&mut self) -> Arena<'_, A> {
-    let r = unsafe { self.0.as_mut_ref::<Root<A>>() };
-    r.last = r.head;
-    let h = unsafe { foo::as_ref(r.head) };
-    Arena(h.next, PhantomData)
-  }
-
-  /// A reference to the parent allocator.
-
-  pub fn allocator(&self) -> &A {
-    let r = unsafe { self.0.as_ref::<Root<A>>() };
-    &r.allocator
-  }
-}
-
-impl<A: Allocator> Drop for Store<A> {
-  fn drop(&mut self) {
-    let CHUNK_ALIGN = const { max(WORD, align_of::<Head>()) };
-    let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
-    let ROOT_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Root<A>>() };
-    let ROOT_SLOP = const { ! (WORD - 1) & align_of::<Root<A>>() - 1 };
-
-    let root = unsafe { self.0.as_ref::<Root<A>>() };
-    let last = root.head;
-    let mut span = unsafe { foo::as_ref(last) }.next;
-
-    let mut allocator = unsafe { foo::read(foo::from_ref(&root.allocator)) };
-
-    loop {
-      let p = span.tail - (span.size + HEAD_SIZE);
-
-      if p == ptr::from(last) {
-        let n = span.size + HEAD_SIZE + ROOT_SIZE + ROOT_SLOP;
-        let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-        unsafe { allocator.free(p.as_non_null(), l) };
-        break;
-      }
-
-      let n = span.size + HEAD_SIZE;
-      let l = unsafe { Layout::from_size_align_unchecked(n, CHUNK_ALIGN) };
-      span = unsafe { p.as_ref::<Head>() }.next;
-      unsafe { allocator.free(p.as_non_null(), l) };
+      return Arena {
+        span: Span {
+          tail: root + SIZE,
+          size: SIZE - size_of::<Head>()
+        },
+        _phantom_data: PhantomData
+      };
     }
 
-    // NB: We will drop `allocator` exactly once. This call to `drop` is not
-    // necessary, but serves as a reminder of this fact.
-    drop::<A>(allocator)
+    let head = unsafe { self.root.as_ref::<Head>() };
+    let next = head.next;
+    let size = head.size;
+
+    if next.is_null () {
+      // CASE 2: Exactly one slab.
+
+      return Arena {
+        span: Span {
+          tail: self.root + size,
+          size: size - size_of::<Head>()
+        },
+        _phantom_data: PhantomData
+      };
+    }
+
+    // CASE 3: Two or more slabs.
+
+    let mut curr_slab = self.root;
+    let mut next_slab = next;
+    let mut prev_size = 0;
+    let mut curr_size = size;
+
+    // Unlink.
+
+    self.root = ptr::NULL;
+
+    // Free slabs.
+
+    loop {
+      unsafe { global_free(curr_slab, curr_size - prev_size, QUANTUM) };
+
+      if next_slab.is_null() { break; }
+
+      let head = unsafe { next_slab.as_ref::<Head>() };
+      curr_slab = next_slab;
+      next_slab = head.next;
+      prev_size = curr_size;
+      curr_size = head.size;
+    }
+
+    // Allocate new block.
+
+    debug_assert!(curr_size <= MAX_SIZE);
+
+    let size = 1 << BITS - clz(curr_size - 1);
+    let root = unsafe { global_alloc(size, QUANTUM) };
+
+    unsafe { root.write(Head { next: ptr::NULL, size }) };
+
+    self.root = root;
+
+    return Arena {
+      span: Span {
+        tail: root + size,
+        size: size - size_of::<Head>()
+      },
+      _phantom_data: PhantomData
+    };
   }
 }
 
-impl<A: Allocator> core::fmt::Debug for Store<A> {
+impl Drop for Store {
+  fn drop(&mut self) {
+    let mut curr_slab;
+    let mut next_slab = self.root;
+    let mut prev_size;
+    let mut curr_size = 0;
+
+    // Unlink.
+
+    self.root = ptr::NULL;
+
+    // Free blocks.
+
+    while ! next_slab.is_null() {
+      let head = unsafe { next_slab.as_ref::<Head>() };
+      curr_slab = next_slab;
+      next_slab = head.next;
+      prev_size = curr_size;
+      curr_size = head.size;
+
+      unsafe { global_free(curr_slab, curr_size - prev_size, QUANTUM) };
+    }
+  }
+}
+
+/*
+impl core::fmt::Debug for Store {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Store").finish()
+    f.debug_tuple("Store").field(&self.root).finish()
+  }
+}
+*/
+
+impl core::fmt::Debug for Store {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    let mut slab = self.root;
+    let mut size = 0;
+    let mut acc = alloc::vec::Vec::new();
+
+    while ! slab.is_null() {
+      let head = unsafe { slab.as_ref::<Head>() };
+      acc.push(head.size - size);
+      slab = head.next;
+      size = head.size;
+    }
+
+    let acc = acc.into_boxed_slice();
+
+    f.debug_tuple("Store").field(&acc).finish()
   }
 }
 
@@ -366,154 +320,85 @@ impl<A: Allocator> core::fmt::Debug for Store<A> {
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-unsafe fn alloc_fast(span: Span, layout: Layout) -> Option<Span> {
+unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
   let p = span.tail;
   let n = span.size;
   let a = layout.align();
   let s = layout.size();
 
-  core::hint::assert_unchecked(p.addr() & WORD - 1 == 0);
+  core::hint::assert_unchecked(p.addr() & QUANTUM - 1 == 0);
 
-  let d = s + ((WORD - 1 | a - 1) & p.addr().wrapping_sub(s));
-  let k = n.checked_sub(d)?;
+  let d = s + (p.addr().wrapping_sub(s) & (a - 1 | QUANTUM - 1));
+  let k = n.wrapping_sub(d);
 
-  Some(Span::new(p - d, k))
+  (Span { tail: p - d, size: k }, d <= n)
 }
 
 #[inline(never)]
 #[cold]
-unsafe fn alloc_slow<A, E>(span: Span, layout: Layout) -> [Result<Span, E>; 1]
-where
-  A: Allocator,
-  E: Fail,
-{
-  let ALIGN_CHUNK = const { max(WORD, align_of::<Head>()) };
-  let HEAD_SIZE = const { ! (WORD - 1) & WORD - 1 + size_of::<Head>() };
+unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
+  let head = (span.tail - span.size - size_of::<Head>()).as_mut_ref::<Head>();
+  let span_out = span;
 
-  let h = (span.tail - (span.size + HEAD_SIZE)).as_ref::<Head>();
-  let r = h.root.as_mut_ref::<Root<A>>();
+  // PROPOSITION
+  //
+  // The following expression does not overflow.
+  //
+  // PROOF
+  //
+  // ???
 
-  if foo::from_ref(h) != r.last {
-    if let Some(s) = alloc_fast(h.next, layout) {
-      return [Ok(s)];
-    }
+  let size =
+    size_of::<Head>()
+      + (! (QUANTUM - 1) & QUANTUM - 1 + layout.size())
+      + (! (QUANTUM - 1) & layout.align() - 1);
+
+  if ! (size <= MAX_SIZE) {
+    panic!("oxcart: Arena capacity would exceed maximum size!");
   }
 
-  if ! (layout.size() <= MAX_ALLOC && layout.align() <= MAX_ALIGN) {
-    return [E::fail(Error::TooLarge)];
+  let prev_size = head.size;
+
+  debug_assert!(prev_size <= MAX_SIZE);
+
+  let size = max(size, prev_size);
+  let size = 1 << BITS - clz(size - 1);
+
+  if ! (size <= MAX_SIZE - prev_size) {
+    panic!("oxcart: Arena capacity would exceed maximum size!");
   }
 
-  let h = foo::as_mut_ref(r.head);
+  let curr_size = prev_size + size;
 
-  let n =
-    1 << BITS - clz(
-      max(
-        max(
-          h.next.size + HEAD_SIZE,
-          r.used / 4 + 1,
-        ),
-        HEAD_SIZE
-          + (! (WORD - 1) & WORD - 1 + layout.size())
-          + (! (WORD - 1) & layout.align() - 1)
-      ) - 1
-    );
+  let p = global_alloc(size, QUANTUM);
 
-  let l = Layout::from_size_align_unchecked(n, ALIGN_CHUNK);
+  p.write(Head { next: ptr::NULL, size: curr_size });
 
-  let Some(p) = r.allocator.alloc(l) else {
-    return [E::fail(Error::ParentAllocatorFailed(l))];
-  };
+  head.next = p;
 
-  let p = foo::cast(p);
-  let t = foo::add::<_, u8>(p, n);
+  let span = Span { tail: p + size, size: size - size_of::<Head>() };
+  let span = alloc_fast(span, layout).0;
 
-  let head = Head {
-    next: h.next,
-    root: h.root,
-  };
-
-  foo::write(p, head);
-
-  let span = Span::new(ptr::from(t), n - HEAD_SIZE);
-
-  h.next = span;
-  r.last = p;
-  r.used = r.used.saturating_add(n);
-
-  [Ok(alloc_fast(span, layout).unwrap_unchecked())]
+  *span_out = span;
 }
 
-#[inline(always)]
-fn alloc_layout<'a, A, E>(arena: &mut Arena<'a, A>, layout: Layout) -> Result<NonNull<u8>, E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  let s = arena.0;
-  let s =
-    match unsafe { alloc_fast(s, layout) } {
-      Some(s) => s,
-      None =>
-        match unsafe { alloc_slow::<A, E>(s, layout) } {
-          [Ok(s)] => s,
-          [Err(e)] => return Err(e),
-        },
-    };
-  arena.0 = s;
-  Ok(unsafe { s.tail.as_non_null() })
-}
-
-#[inline(always)]
-fn alloc<'a, A, E, T>(arena: &mut Arena<'a, A>) -> Result<Slot<'a, T>, E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  let x = alloc_layout(arena, Layout::new::<T>())?;
-  Ok(Slot(foo::cast(x), PhantomData))
-}
-
-#[inline(always)]
-fn alloc_slice<'a, A, E, T>(arena: &mut Arena<'a, A>, len: usize) -> Result<Slot<'a, [T]>, E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  if ! (size_of::<T>() == 0 || len <= MAX_ALLOC / size_of::<T>()) {
-    return E::fail(Error::TooLarge);
+impl<'a> Arena<'a> {
+  #[inline(always)]
+  fn alloc_internal(&mut self, layout: Layout) -> ptr {
+    let span = self.span;
+    let span =
+      match unsafe { alloc_fast(span, layout) } {
+        (span, true) => span,
+        (span, false) => {
+          let mut span = span;
+          unsafe { alloc_slow(&mut span, layout) };
+          span
+        }
+      };
+    self.span = span;
+    span.tail
   }
 
-  let l = unsafe { Layout::from_size_align_unchecked(size_of::<T>() * len, align_of::<T>()) };
-  let x = alloc_layout(arena, l)?;
-  Ok(Slot(foo::as_slice(foo::cast(x), len), PhantomData))
-}
-
-#[inline(always)]
-fn copy_slice<'a, A, E, T>(arena: &mut Arena<'a, A>, src: &[T]) -> Result<&'a mut [T], E>
-where
-  A: Allocator,
-  E: Fail,
-  T: Copy,
-{
-  let x = alloc_layout(arena, Layout::for_value(src))?;
-  let x = foo::cast(x);
-  let y = foo::cast(foo::from_ref(src));
-  let n = src.len();
-  unsafe { foo::copy_nonoverlapping::<T>(y, x, n) };
-  Ok(unsafe { foo::as_slice_mut_ref(x, n) })
-}
-
-#[inline(always)]
-fn copy_str<'a, A, E>(arena: &mut Arena<'a, A>, src: &str) -> Result<&'a mut str, E>
-where
-  A: Allocator,
-  E: Fail,
-{
-  let x = copy_slice(arena, src.as_bytes())?;
-  Ok(unsafe { core::str::from_utf8_unchecked_mut(x) })
-}
-
-impl<'a, A: Allocator> Arena<'a, A> {
   /// Allocates memory for a single value.
   ///
   /// # Panics
@@ -522,18 +407,8 @@ impl<'a, A: Allocator> Arena<'a, A> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
-    unwrap(alloc(self))
-  }
-
-  /// Allocates memory for a single value.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
-
-  #[inline(always)]
-  pub fn try_alloc<T>(&mut self) -> Result<Slot<'a, T>, AllocError> {
-    alloc(self)
+    let x = self.alloc_internal(Layout::new::<T>());
+    Slot(unsafe { x.as_non_null() }, PhantomData)
   }
 
   /// Allocates memory for a slice of the given length.
@@ -544,18 +419,15 @@ impl<'a, A: Allocator> Arena<'a, A> {
 
   #[inline(always)]
   pub fn alloc_slice<T>(&mut self, len: usize) -> Slot<'a, [T]> {
-    unwrap(alloc_slice(self, len))
-  }
+    if size_of::<T>() != 0 && ! (len <= isize::MAX as usize / size_of::<T>()) {
+      panic!("oxcart: Layout computation would overflow!");
+    }
 
-  /// Allocates memory for a slice of the given length.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
-
-  #[inline(always)]
-  pub fn try_alloc_slice<T>(&mut self, len: usize) -> Result<Slot<'a, [T]>, AllocError> {
-    alloc_slice(self, len)
+    let align = align_of::<T>();
+    let size = len * size_of::<T>();
+    let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
+    let x = self.alloc_internal(layout);
+    Slot(unsafe { x.as_slice_non_null(len) }, PhantomData)
   }
 
   /// Copies the given slice into a new allocation.
@@ -569,21 +441,10 @@ impl<'a, A: Allocator> Arena<'a, A> {
   where
     T: Copy
   {
-    unwrap(copy_slice(self, src))
-  }
-
-  /// Copies the given slice into a new allocation.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
-
-  #[inline(always)]
-  pub fn try_copy_slice<T>(&mut self, src: &[T]) -> Result<&'a mut [T], AllocError>
-  where
-    T: Copy
-  {
-    copy_slice(self, src)
+    let x = self.alloc_internal(Layout::for_value(src));
+    let n = src.len();
+    unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, n) };
+    unsafe { x.as_slice_mut_ref(n) }
   }
 
   /// Copies the given string into a new allocation.
@@ -594,18 +455,8 @@ impl<'a, A: Allocator> Arena<'a, A> {
 
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
-    unwrap(copy_str(self, src))
-  }
-
-  /// Copies the given string into a new allocation.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
-
-  #[inline(always)]
-  pub fn try_copy_str(&mut self, src: &str) -> Result<&'a mut str, AllocError> {
-    copy_str(self, src)
+    let x = self.copy_slice(src.as_bytes());
+    unsafe { core::str::from_utf8_unchecked_mut(x) }
   }
 
   /// Allocates memory for the given layout. The memory is valid for the
@@ -617,27 +468,16 @@ impl<'a, A: Allocator> Arena<'a, A> {
 
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> NonNull<u8> {
-    unwrap(alloc_layout(self, layout))
-  }
-
-  /// Allocates memory for the given layout. The memory is valid for the
-  /// lifetime `'a` from `Arena<'a>`.
-  ///
-  /// # Errors
-  ///
-  /// An error is returned on failure to allocate memory.
-
-  #[inline(always)]
-  pub fn try_alloc_layout(&mut self, layout: Layout) -> Result<NonNull<u8>, AllocError> {
-    alloc_layout(self, layout)
+    let x = self.alloc_internal(layout);
+    unsafe { x.as_non_null() }
   }
 }
 
-impl<'a, A: Allocator> core::fmt::Debug for Arena<'a, A> {
+impl<'a> core::fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     f.debug_tuple("Arena")
-      .field(&self.0.tail)
-      .field(&self.0.size)
+      .field(&self.span.tail)
+      .field(&self.span.size)
       .finish()
   }
 }
@@ -759,28 +599,12 @@ impl<'a, T> Slot<'a, [T]> {
 
 impl<'a, T> core::fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Slot").field(&self.0).finish()
+    f.debug_tuple("Slot").field(&self.ptr()).finish()
   }
 }
 
-////////////////////////////////////////////////////////////////////////////////
-//                                                                            //
-// Allocator API                                                              //
-//                                                                            //
-////////////////////////////////////////////////////////////////////////////////
-
-unsafe impl<'a, A: Allocator> Allocator for Arena<'a, A> {
-  #[inline(always)]
-  fn alloc(&mut self, layout: Layout) -> Option<NonNull<u8>> {
-    match alloc_layout::<_, AllocError>(self, layout) {
-      Ok(p) => Some(p),
-      Err(_) => None,
-    }
-  }
-
-  #[inline(always)]
-  unsafe fn free(&mut self, ptr: NonNull<u8>, layout: Layout) {
-    let _ = ptr;
-    let _ = layout;
+impl<'a, T> core::fmt::Debug for Slot<'a, [T]> {
+  fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+    f.debug_tuple("Slot").field(&self.ptr()).field(&self.len()).finish()
   }
 }

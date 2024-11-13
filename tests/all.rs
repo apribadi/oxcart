@@ -2,34 +2,27 @@
 //!
 //!
 
-// #![cfg_attr(feature = "allocator_api", feature(allocator_api))]
-
 use std::alloc::Layout;
-use std::mem::size_of;
 use oxcart::Arena;
 use oxcart::Slot;
 use oxcart::Store;
-// use allocator_api2::vec::Vec;
 use expect_test::expect;
+
+fn is_panic<F: FnOnce()>(f: F) -> bool {
+  std::panic::catch_unwind(std::panic::AssertUnwindSafe(f)).is_err()
+}
 
 #[test]
 fn test_api() {
   let mut store = Store::new();
-  let _ = Store::try_new();
   let _ = Store::with_capacity(0);
-  let _ = Store::try_with_capacity(0);
   let _ = format!("{:?}", store);
   let mut arena = store.arena();
   let _ = arena.alloc::<u64>();
-  let _ = arena.try_alloc::<u64>();
   let _ = arena.alloc_slice::<u64>(3);
-  let _ = arena.try_alloc_slice::<u64>(3);
   let _ = arena.copy_slice::<u64>(&[0, 1, 2]);
-  let _ = arena.try_copy_slice::<u64>(&[0, 1, 2]);
   let _ = arena.copy_str("hello");
-  let _ = arena.try_copy_str("hello");
   let _ = arena.alloc_layout(Layout::new::<u64>());
-  let _ = arena.try_alloc_layout(Layout::new::<u64>());
   let _ = arena.alloc::<u64>().as_uninit();
   let _ = arena.alloc::<u64>().init(13);
   let _ = arena.alloc::<[u64; 3]>().as_uninit_array();
@@ -38,6 +31,7 @@ fn test_api() {
   let _ = arena.alloc_slice::<u64>(3).init_slice(|i| i as u64);
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
+  expect!["Store([65536])"].assert_eq(&format!("{:?}", store));
 }
 
 #[test]
@@ -60,11 +54,11 @@ fn test_special_traits() {
   is_unpin::<Arena<'static>>();
   is_unwind_safe::<Arena<'static>>();
 
-  is_ref_unwind_safe::<Slot<'static, u64>>();
-  is_send::<Slot<'static, u64>>();
-  is_sync::<Slot<'static, u64>>();
-  is_unpin::<Slot<'static, u64>>();
-  is_unwind_safe::<Slot<'static, u64>>();
+  is_ref_unwind_safe::<Slot<'static, *mut std::cell::UnsafeCell<u64>>>();
+  is_send::<Slot<'static, *mut std::cell::UnsafeCell<u64>>>();
+  is_sync::<Slot<'static, *mut std::cell::UnsafeCell<u64>>>();
+  is_unpin::<Slot<'static, *mut std::cell::UnsafeCell<u64>>>();
+  is_unwind_safe::<Slot<'static, *mut std::cell::UnsafeCell<u64>>>();
 }
 
 #[test]
@@ -118,18 +112,19 @@ fn test_alloc_zero_sized() {
 
 #[test]
 fn test_too_large_allocation() {
-  let too_large_nbytes = isize::MAX as usize - 1;
+  let too_large_nbytes = isize::MAX as usize;
   let too_large_layout = Layout::from_size_align(too_large_nbytes, 1).unwrap();
   let too_large_nwords = too_large_nbytes / size_of::<usize>();
   let mut store = Store::new();
   let mut arena = store.arena();
-  assert!(arena.try_alloc_layout(too_large_layout).is_err());
-  assert!(arena.try_alloc_slice::<usize>(too_large_nwords).is_err());
+
+  assert!(is_panic(|| { let _: _ = arena.alloc_layout(too_large_layout); }));
+  assert!(is_panic(|| { let _: _ = arena.alloc_slice::<usize>(too_large_nwords); }));
 }
 
 #[test]
 fn test_growth() {
-  let mut store = Store::with_capacity(0);
+  let mut store = Store::with_capacity(64);
   let mut arena = store.arena();
   let _ = arena.alloc().init(1_u8);
   let _ = arena.alloc().init(1_u16);
@@ -147,21 +142,11 @@ fn test_growth() {
   let _ = arena.alloc().init([1_u8; 5]);
   let _ = arena.alloc().init([1_u8; 7]);
   let _ = arena.alloc().init([1_u8; 9]);
+  let _ = arena.alloc().init([1_u8; 1000]);
+  expect!["Store([64, 64, 128, 1024])"].assert_eq(&format!("{:?}", store));
+  let _ = store.arena();
+  expect!["Store([2048])"].assert_eq(&format!("{:?}", store));
 }
-
-/*
-#[test]
-fn test_allocator_api() {
-  let mut store = Store::new();
-  let arena = store.arena_cell();
-  let mut x = Vec::new_in(&arena);
-  let mut y = Vec::new_in(&arena);
-  x.push(0);
-  y.push(0);
-  x.push(1);
-  y.push(1);
-}
-*/
 
 #[test]
 fn test_linked_list() {
