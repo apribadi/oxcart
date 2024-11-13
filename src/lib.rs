@@ -96,15 +96,10 @@ const MAX_SIZE: usize = 1 << BITS - 2;
 ////////////////////////////////////////////////////////////////////////////////
 
 #[inline(always)]
-fn clz(x: usize) -> u32 {
-  x.leading_zeros()
-}
-
-#[inline(always)]
 fn ceil_pow2(x: usize) -> usize {
   debug_assert!(1 <= x && x <= 1 << BITS - 1);
 
-  1 << BITS - clz(x - 1)
+  1 << BITS - (x - 1).leading_zeros()
 }
 
 #[inline(always)]
