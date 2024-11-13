@@ -101,6 +101,13 @@ fn clz(x: usize) -> u32 {
 }
 
 #[inline(always)]
+fn ceil_pow2(x: usize) -> usize {
+  debug_assert!(1 <= x && x <= 1 << BITS - 1);
+
+  1 << BITS - clz(x - 1)
+}
+
+#[inline(always)]
 fn min(x: usize, y: usize) -> usize {
   if x <= y { x } else { y }
 }
@@ -167,8 +174,7 @@ impl Store {
   ///   allocator.
 
   pub fn with_capacity(size: usize) -> Self {
-    let size = min(max(size, size_of::<Head>() + 1), MAX_SIZE);
-    let size = 1 << BITS - clz(size - 1);
+    let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
     let root = unsafe { global_alloc(size, QUANTUM) };
     unsafe { root.write(Head { next: ptr::NULL, size }) };
     Store { root }
@@ -250,7 +256,7 @@ impl Store {
 
     debug_assert!(curr_size <= MAX_SIZE);
 
-    let size = 1 << BITS - clz(curr_size - 1);
+    let size = ceil_pow2(curr_size);
     let root = unsafe { global_alloc(size, QUANTUM) };
 
     unsafe { root.write(Head { next: ptr::NULL, size }) };
@@ -358,14 +364,15 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   debug_assert!(prev_size <= MAX_SIZE);
 
-  let size = max(size, prev_size);
-  let size = 1 << BITS - clz(size - 1);
+  let size = ceil_pow2(max(size, prev_size));
 
   if ! (size <= MAX_SIZE - prev_size) {
     panic!("oxcart: Arena capacity would exceed maximum size!");
   }
 
   let curr_size = prev_size + size;
+
+  debug_assert!(curr_size <= MAX_SIZE);
 
   let p = global_alloc(size, QUANTUM);
 
