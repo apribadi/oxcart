@@ -497,13 +497,11 @@ impl<'a, T> Slot<'a, T> {
 
   /// Initializes the slot with the given value.
   ///
-  /// # Panics
-  ///
-  /// Panics if `T` implements [`Drop`].
+  /// Compilation fails if `T` implements [`Drop`].
 
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
-    assert!(! core::mem::needs_drop::<T>());
+    const { assert!(! core::mem::needs_drop::<T>()) };
 
     unsafe { self.ptr().write(value) };
     unsafe { self.ptr().as_mut_ref() }
@@ -521,16 +519,14 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   /// Initializes the array with values produced by calling the given function
   /// with each index in order.
   ///
-  /// # Panics
-  ///
-  /// Panics if `T` implements [`Drop`].
+  /// Compilation fails if `T` implements [`Drop`].
 
   #[inline(always)]
   pub fn init_array<F>(self, f: F) -> &'a mut [T; N]
   where
     F: FnMut(usize) -> T
   {
-    assert!(! core::mem::needs_drop::<T>());
+    const { assert!(! core::mem::needs_drop::<T>()) };
 
     let mut p = self.ptr();
     let mut i = 0;
@@ -564,16 +560,14 @@ impl<'a, T> Slot<'a, [T]> {
   /// Initializes the slice with values produced by calling the given function
   /// with each index in order.
   ///
-  /// # Panics
-  ///
-  /// Panics if `T` implements [`Drop`].
+  /// Compilation fails if `T` implements [`Drop`].
 
   #[inline(always)]
   pub fn init_slice<F>(self, f: F) -> &'a mut [T]
   where
     F: FnMut(usize) -> T
   {
-    assert!(! core::mem::needs_drop::<T>());
+    const { assert!(! core::mem::needs_drop::<T>()) };
 
     let mut p = self.ptr();
     let mut i = 0;
