@@ -15,16 +15,16 @@ use pop::ptr;
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-/// A `Store` owns the memory reserved for an arena allocator.
+/// A `Store` owns the memory reserved for some arena allocators.
 ///
-/// The memory is released to the global allocator when the `Store` is dropped.
+/// The memory is released back to the global allocator when the `Store` is
+/// dropped.
 
 pub struct Store {
   root: ptr
 }
 
-/// An `Arena<'a>` is a high performance memory allocator that allocates memory
-/// regions with lifetime `'a`.
+/// An `Arena<'a>` allocates memory regions live for the lifetime `'a`.
 
 pub struct Arena<'a> {
   span: Span,
@@ -37,7 +37,7 @@ pub struct Arena<'a> {
 /// Typically you will initialize a slot with [`init`](Self::init) or
 /// [`init_slice`](Self::init_slice).
 
-pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<&'a ()>);
+pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<fn(T) -> &'a ()>);
 
 unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
 
@@ -72,20 +72,21 @@ struct Span {
 
 // We allocate from an arena in multiples of `QUANTUM`.
 //
-// We require the two facts
+// We require both
 //
-// - align_of::<Head>() <= QUANTUM
+// - align_of::<Head>() <= QUANTUM, and
 // - size_of::<Head>() % QUANTUM == 0
 //
-// and this definition of QUANTUM guarantees them.
+// and this definition of QUANTUM guarantees those conditions.
 
 const QUANTUM: usize = align_of::<Head>();
 
+// Number of bits in a word.
+
 const BITS: u32 = usize::BITS;
 
-// We limit the total capacity of an arena to `MAX_SIZE`.
-//
-// It is the largest power of two that is a valid layout size.
+// We limit the total capacity of an arena to `MAX_SIZE`. It is the largest
+// power of two that is a valid layout size.
 
 const MAX_SIZE: usize = 1 << BITS - 2;
 
@@ -114,19 +115,18 @@ fn max(x: usize, y: usize) -> usize {
 
 // SAFETY
 //
-// - A `Layout` with this `size` and `align` must be valid.
+// - A `Layout` with this `size` and `align == QUANTUM` must be valid.
 // - The `size` must be non-zero.
 
-unsafe fn global_alloc(size: usize, align: usize) -> ptr {
-  debug_assert!(Layout::from_size_align(size, align).is_ok());
+unsafe fn global_alloc(size: usize) -> ptr {
+  debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
-  let layout = Layout::from_size_align_unchecked(size, align);
-  let p = alloc::alloc::alloc(layout);
-  let p = ptr::from(p);
+  let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
+  let p = unsafe { ptr::from(alloc::alloc::alloc(layout)) };
 
   if p.is_null() {
-    panic!("oxcart: Allocating from the global allocator failed!")
+    panic!("oxcart: Allocating with the global allocator failed!")
   }
 
   p
@@ -135,14 +135,13 @@ unsafe fn global_alloc(size: usize, align: usize) -> ptr {
 // SAFETY
 //
 // - The pointer `p` must refer to a currently allocated region that was
-//   allocated with this `size` and `align`.
+//   allocated with this `size` and `align == QUANTUM`.
 
-unsafe fn global_free(p: ptr, size: usize, align: usize) {
-  debug_assert!(Layout::from_size_align(size, align).is_ok());
+unsafe fn global_free(p: ptr, size: usize) {
+  debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
 
-  let layout = Layout::from_size_align_unchecked(size, align);
-  let p = p.as_mut_ptr();
-  alloc::alloc::dealloc(p, layout);
+  let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
+  unsafe { alloc::alloc::dealloc(p.as_mut_ptr(), layout) };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -158,7 +157,8 @@ impl Store {
     Store { root: ptr::NULL }
   }
 
-  /// Creates a new store and pre-allocates approximately `size` memory.
+  /// Creates a new store and pre-allocates approximately `size` bytes of
+  /// memory.
   ///
   /// The `size` parameter is purely advisory, and guarentees neither
   ///
@@ -170,15 +170,15 @@ impl Store {
 
   pub fn with_capacity(size: usize) -> Self {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
-    let root = unsafe { global_alloc(size, QUANTUM) };
-    unsafe { root.write(Head { next: ptr::NULL, size }) };
+    let root = unsafe { global_alloc(size) };
+    unsafe { ptr::write(root, Head { next: ptr::NULL, size }) };
     Store { root }
   }
 
   /// Prepares an arena.
   ///
-  /// The allocations from that arena will have a lifetime bounded by the
-  /// lifetime of this `&'a mut self` reference.
+  /// The allocations from this arena will have a lifetime bounded by the
+  /// lifetime of the `&'a mut self` method receiver.
   ///
   /// # Panics
   ///
@@ -191,9 +191,9 @@ impl Store {
 
       const SIZE: usize = 1 << 16;
 
-      let root = unsafe { global_alloc(SIZE, QUANTUM) };
+      let root = unsafe { global_alloc(SIZE) };
 
-      unsafe { root.write(Head { next: ptr::NULL, size: SIZE }) };
+      unsafe { ptr::write(root, Head { next: ptr::NULL, size: SIZE }) };
 
       self.root = root;
 
@@ -236,7 +236,7 @@ impl Store {
     // Free slabs.
 
     loop {
-      unsafe { global_free(curr_slab, curr_size - prev_size, QUANTUM) };
+      unsafe { global_free(curr_slab, curr_size - prev_size) };
 
       if next_slab.is_null() { break; }
 
@@ -252,9 +252,9 @@ impl Store {
     debug_assert!(curr_size <= MAX_SIZE);
 
     let size = ceil_pow2(curr_size);
-    let root = unsafe { global_alloc(size, QUANTUM) };
+    let root = unsafe { global_alloc(size) };
 
-    unsafe { root.write(Head { next: ptr::NULL, size }) };
+    unsafe { ptr::write(root, Head { next: ptr::NULL, size }) };
 
     self.root = root;
 
@@ -288,8 +288,14 @@ impl Drop for Store {
       prev_size = curr_size;
       curr_size = head.size;
 
-      unsafe { global_free(curr_slab, curr_size - prev_size, QUANTUM) };
+      unsafe { global_free(curr_slab, curr_size - prev_size) };
     }
+  }
+}
+
+impl Default for Store {
+  fn default() -> Self {
+    Store::new()
   }
 }
 
@@ -325,7 +331,7 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
   let a = layout.align();
   let s = layout.size();
 
-  core::hint::assert_unchecked(p.addr() & QUANTUM - 1 == 0);
+  unsafe { core::hint::assert_unchecked(p.addr() & QUANTUM - 1 == 0) };
 
   let d = s + (p.addr().wrapping_sub(s) & (a - 1 | QUANTUM - 1));
 
@@ -335,7 +341,7 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
 #[inline(never)]
 #[cold]
 unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
-  let head = (span.tail - span.size - size_of::<Head>()).as_mut_ref::<Head>();
+  let head = unsafe { (span.tail - span.size - size_of::<Head>()).as_mut_ref::<Head>() };
   let span_out = span;
 
   // PROPOSITION
@@ -369,14 +375,14 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   debug_assert!(curr_size <= MAX_SIZE);
 
-  let p = global_alloc(size, QUANTUM);
+  let p = unsafe { global_alloc(size) };
 
-  p.write(Head { next: ptr::NULL, size: curr_size });
+  unsafe { ptr::write(p, Head { next: ptr::NULL, size: curr_size }) };
 
   head.next = p;
 
   let span = Span { tail: p + size, size: size - size_of::<Head>() };
-  let span = alloc_fast(span, layout).0; // Must succeed.
+  let span = unsafe { alloc_fast(span, layout).0 }; // Must succeed.
 
   *span_out = span;
 }
@@ -399,6 +405,12 @@ impl<'a> Arena<'a> {
 
   /// Allocates memory for a single value.
   ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc().init(1_u64);
+  /// ```
+  ///
   /// # Panics
   ///
   /// Panics on failure to allocate memory.
@@ -410,6 +422,12 @@ impl<'a> Arena<'a> {
   }
 
   /// Allocates memory for a slice of the given length.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc_slice(5).init_slice(|i| i as u64);
+  /// ```
   ///
   /// # Panics
   ///
@@ -430,6 +448,12 @@ impl<'a> Arena<'a> {
 
   /// Copies the given slice into a new allocation.
   ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.copy_slice(&[0_u64, 1, 2, 3, 4]);
+  /// ```
+  ///
   /// # Panics
   ///
   /// Panics on failure to allocate memory.
@@ -444,6 +468,12 @@ impl<'a> Arena<'a> {
 
   /// Copies the given string into a new allocation.
   ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.copy_str("Hello!");
+  /// ```
+  ///
   /// # Panics
   ///
   /// Panics on failure to allocate memory.
@@ -456,6 +486,13 @@ impl<'a> Arena<'a> {
 
   /// Allocates memory for the given layout. The memory is valid for the
   /// lifetime `'a` from `Arena<'a>`.
+  ///
+  /// ```
+  /// # use std::alloc::Layout;
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc_layout(Layout::new::<u64>());
+  /// ```
   ///
   /// # Panics
   ///
@@ -489,6 +526,12 @@ impl<'a, T: ?Sized> Slot<'a, T> {
 
 impl<'a, T> Slot<'a, T> {
   /// Converts the slot into a reference to an uninitialized value.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc().as_uninit().write(1_u64);
+  /// ```
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
@@ -497,19 +540,45 @@ impl<'a, T> Slot<'a, T> {
 
   /// Initializes the slot with the given value.
   ///
-  /// Compilation fails if `T` implements [`Drop`].
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc().init(1_u64);
+  /// ```
+  ///
+  /// # Static Panics
+  ///
+  /// Compilation fails if `T` implements [Drop].
+  ///
+  /// You can avoid this restriction by wrapping with
+  /// [ManuallyDrop][core::mem::ManuallyDrop].
+  ///
+  /// ```
+  /// # use core::mem::ManuallyDrop;
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let x = arena.alloc().init(ManuallyDrop::new(Vec::new()));
+  /// x.push(1_u64);
+  /// unsafe { ManuallyDrop::drop(x) };
+  /// ```
 
   #[inline(always)]
   pub fn init(self, value: T) -> &'a mut T {
     const { assert!(! core::mem::needs_drop::<T>()) };
 
-    unsafe { self.ptr().write(value) };
+    unsafe { ptr::write(self.ptr(), value) };
     unsafe { self.ptr().as_mut_ref() }
   }
 }
 
 impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   /// Converts the slot into a reference to an array of uninitialized values.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc::<[u64; 5]>().as_uninit_array();
+  /// ```
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
@@ -518,6 +587,14 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   /// Initializes the array with values produced by calling the given function
   /// with each index in order.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc::<[_; 5]>().init_array(|i| i as u64);
+  /// ```
+  ///
+  /// # Static Panics
   ///
   /// Compilation fails if `T` implements [`Drop`].
 
@@ -533,7 +610,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
     let mut f = f;
 
     while i < N {
-      unsafe { p.write(f(i)) };
+      unsafe { ptr::write(p, f(i)) };
       i = i + 1;
       p = p + size_of::<T>();
     }
@@ -544,6 +621,12 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
 impl<'a, T> Slot<'a, [T]> {
   /// The length of the uninitialized slice.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// assert!(arena.alloc_slice::<u64>(5).len() == 5);
+  /// ```
 
   #[inline(always)]
   pub fn len(&self) -> usize {
@@ -551,6 +634,12 @@ impl<'a, T> Slot<'a, [T]> {
   }
 
   /// Converts the slot into a reference to a slice of uninitialized values.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc_slice::<u64>(5).as_uninit_slice();
+  /// ```
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
@@ -559,6 +648,14 @@ impl<'a, T> Slot<'a, [T]> {
 
   /// Initializes the slice with values produced by calling the given function
   /// with each index in order.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.alloc_slice(5).init_slice(|i| i as u64);
+  /// ```
+  ///
+  /// # Static Panics
   ///
   /// Compilation fails if `T` implements [`Drop`].
 
@@ -574,7 +671,7 @@ impl<'a, T> Slot<'a, [T]> {
     let mut f = f;
 
     while i < self.len() {
-      unsafe { p.write(f(i)) };
+      unsafe { ptr::write(p, f(i)) };
       i = i + 1;
       p = p + size_of::<T>();
     }
