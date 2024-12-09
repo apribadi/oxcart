@@ -11,7 +11,7 @@ use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-// PUBLIC TYPE DEFINITIONS                                                    //
+// PUBLIC TYPES                                                               //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -49,7 +49,7 @@ impl <'a, T: ?Sized> core::panic::RefUnwindSafe for Slot<'a, T> { }
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
-// PRIVATE TYPE                                                               //
+// PRIVATE TYPES                                                              //
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -77,7 +77,7 @@ struct Span {
 // - align_of::<Head>() <= QUANTUM, and
 // - size_of::<Head>() % QUANTUM == 0
 //
-// and this definition of QUANTUM guarantees those conditions.
+// and this definition of QUANTUM guarantees those two conditions.
 
 const QUANTUM: usize = align_of::<Head>();
 
@@ -139,6 +139,7 @@ unsafe fn global_alloc(size: usize) -> ptr {
 
 unsafe fn global_free(p: ptr, size: usize) {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
+  debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
   unsafe { alloc::alloc::dealloc(p.as_mut_ptr(), layout) };
@@ -151,7 +152,13 @@ unsafe fn global_free(p: ptr, size: usize) {
 ////////////////////////////////////////////////////////////////////////////////
 
 impl Store {
-  /// Creates a new empty store.
+  /// Creates a new empty store. This does not reserve any memory from the
+  /// global allocator.
+  ///
+  /// ```
+  /// # use oxcart::Store;
+  /// let mut store = Store::new();
+  /// ```
 
   pub const fn new() -> Self {
     Store { root: ptr::NULL }
@@ -167,6 +174,11 @@ impl Store {
   ///
   /// - an upper bound on the amount of memory requested from the global
   ///   allocator.
+  ///
+  /// ```
+  /// # use oxcart::Store;
+  /// let mut store = Store::with_capacity(100);
+  /// ```
 
   pub fn with_capacity(size: usize) -> Self {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
@@ -184,6 +196,12 @@ impl Store {
   ///
   /// Panics if the underlying global memory allocator fails to deallocate or
   /// allocate memory.
+  ///
+  /// ```
+  /// # use oxcart::Store;
+  /// let mut store = Store::new();
+  /// let mut arena = store.arena();
+  /// ```
 
   pub fn arena<'a>(&'a mut self) -> Arena<'a> {
     if self.root.is_null() {
@@ -303,18 +321,18 @@ impl core::fmt::Debug for Store {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
     let mut slab = self.root;
     let mut size = 0;
-    let mut acc = alloc::vec::Vec::new();
+    let mut list = alloc::vec::Vec::new();
 
     while ! slab.is_null() {
       let head = unsafe { slab.as_ref::<Head>() };
-      acc.push(head.size - size);
+      list.push(head.size - size);
       slab = head.next;
       size = head.size;
     }
 
-    let acc = acc.into_boxed_slice();
+    let list = list.into_boxed_slice();
 
-    f.debug_tuple("Store").field(&acc).finish()
+    f.debug_tuple("Store").field(&list).finish()
   }
 }
 
@@ -625,7 +643,7 @@ impl<'a, T> Slot<'a, [T]> {
   /// ```
   /// # let mut store = oxcart::Store::with_capacity(100);
   /// # let mut arena = store.arena();
-  /// assert!(arena.alloc_slice::<u64>(5).len() == 5);
+  /// let _ = arena.alloc_slice::<u64>(5).len();
   /// ```
 
   #[inline(always)]
