@@ -20,6 +20,7 @@ fn test_api() {
   let y = arena.alloc_slice::<u64>(3);
   let _ = arena.copy_slice::<u64>(&[0, 1, 2]);
   let _ = arena.copy_str("hello");
+  let _ = arena.slice_from_iter(0u32 .. 3u32);
   let _ = arena.alloc_layout(Layout::new::<u64>());
   let _ = arena.alloc::<u64>().as_uninit();
   let _ = arena.alloc::<u64>().init(13);
@@ -30,7 +31,7 @@ fn test_api() {
   let _ = format!("{:?}", arena);
   let _ = format!("{:?}", arena.alloc::<u64>());
 
-  expect!["Arena(65328)"].assert_eq(&format!("{:?}", arena)); // NB: arch dependent
+  expect!["Arena(65312)"].assert_eq(&format!("{:?}", arena)); // NB: arch dependent
   expect!["Slot"].assert_eq(&format!("{:?}", x));
   expect!["Slot(3)"].assert_eq(&format!("{:?}", y));
   expect!["Store([65536])"].assert_eq(&format!("{:?}", store));

@@ -502,6 +502,30 @@ impl<'a> Arena<'a> {
     unsafe { core::str::from_utf8_unchecked_mut(x) }
   }
 
+  /// Given an [ExactSizeIterator], allocates an appropriately sized slice and
+  /// initializes it with the iterator's items.
+  ///
+  /// ```
+  /// # let mut store = oxcart::Store::with_capacity(100);
+  /// # let mut arena = store.arena();
+  /// let _ = arena.slice_from_iter(0u32 .. 5u32);
+  /// ```
+  ///
+  /// # Panics
+  ///
+  /// Panics on failure to allocate memory.
+  ///
+  /// Panics if `iter` does not yield exactly `iter.len()` items.
+
+  #[inline(always)]
+  pub fn slice_from_iter<T>(&mut self, iter: impl ExactSizeIterator<Item = T>) -> &'a mut [T] {
+    let mut iter = iter;
+    let x = self.alloc_slice(iter.len());
+    let x = x.init_slice(|_| iter.next().unwrap());
+    assert!(iter.next().is_none());
+    x
+  }
+
   /// Allocates memory for the given layout. The memory is valid for the
   /// lifetime `'a` from `Arena<'a>`.
   ///
