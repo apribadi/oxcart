@@ -2,7 +2,7 @@
 authors = ["Aaron Pribadi <aaron.pribadi@gmail.com>"]
 categories = ["memory-management", "rust-patterns"]
 description = "A high performance arena allocator."
-edition = "2021"
+edition = "2024"
 license = "Artistic-2.0"
 name = "oxcart"
 version = "0.1.0"
