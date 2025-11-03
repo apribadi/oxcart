@@ -480,7 +480,7 @@ impl<'a> Arena<'a> {
   pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
     let x = self.alloc_internal(Layout::for_value(src));
     let n = src.len();
-    unsafe { ptr::copy_nonoverlapping::<T>(ptr::from(src), x, n) };
+    unsafe { x.copy_from_nonoverlapping::<T>(ptr::from(src), n) };
     unsafe { x.as_slice_mut_ref(n) }
   }
 
