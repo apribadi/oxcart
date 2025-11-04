@@ -7,7 +7,7 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
-use pop::ptr;
+use pop::v2::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
@@ -21,7 +21,7 @@ use pop::ptr;
 /// dropped.
 
 pub struct Store {
-  root: ptr
+  root: ptr<Head>
 }
 
 /// An `Arena<'a>` allocates memory regions live for the lifetime `'a`.
@@ -58,13 +58,13 @@ impl <'a, T: ?Sized> core::panic::UnwindSafe for Slot<'a, T> {
 ////////////////////////////////////////////////////////////////////////////////
 
 struct Head {
-  next: ptr,
+  next: ptr<Head>,
   size: usize,
 }
 
 #[derive(Clone, Copy)]
 struct Span {
-  tail: ptr,
+  tail: ptr<u8>,
   size: usize,
 }
 
@@ -122,7 +122,7 @@ fn max(x: usize, y: usize) -> usize {
 // - A `Layout` with this `size` and `align == QUANTUM` must be valid.
 // - The `size` must be non-zero.
 
-unsafe fn global_alloc(size: usize) -> ptr {
+unsafe fn global_alloc(size: usize) -> ptr<u8> {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
@@ -141,7 +141,7 @@ unsafe fn global_alloc(size: usize) -> ptr {
 // - The pointer `p` must refer to a currently allocated region that was
 //   allocated with this `size` and `align == QUANTUM`.
 
-unsafe fn global_free(p: ptr, size: usize) {
+unsafe fn global_free(p: ptr<u8>, size: usize) {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
@@ -165,7 +165,7 @@ impl Store {
   /// ```
 
   pub const fn new() -> Self {
-    Store { root: ptr::NULL }
+    Store { root: ptr::null() }
   }
 
   /// Creates a new store and pre-allocates approximately `size` bytes of
@@ -186,8 +186,8 @@ impl Store {
 
   pub fn with_capacity(size: usize) -> Self {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
-    let root = unsafe { global_alloc(size) };
-    unsafe { ptr::write(root, Head { next: ptr::NULL, size }) };
+    let root = unsafe { global_alloc(size) }.cast::<Head>();
+    unsafe { root.write(Head { next: ptr::null(), size }) };
     Store { root }
   }
 
@@ -213,22 +213,22 @@ impl Store {
 
       const SIZE: usize = 1 << 16;
 
-      let root = unsafe { global_alloc(SIZE) };
+      let root = unsafe { global_alloc(SIZE) }.cast::<Head>();
 
-      unsafe { ptr::write(root, Head { next: ptr::NULL, size: SIZE }) };
+      unsafe { root.write(Head { next: ptr::null(), size: SIZE }) };
 
       self.root = root;
 
       return Arena {
         span: Span {
-          tail: root + SIZE,
+          tail: root.cast::<u8>() + SIZE,
           size: SIZE - size_of::<Head>()
         },
         _phantom_data: PhantomData
       };
     }
 
-    let head = unsafe { self.root.as_ref::<Head>() };
+    let head = unsafe { self.root.as_ref() };
     let next = head.next;
     let size = head.size;
 
@@ -237,7 +237,7 @@ impl Store {
 
       return Arena {
         span: Span {
-          tail: self.root + size,
+          tail: self.root.cast::<u8>() + size,
           size: size - size_of::<Head>()
         },
         _phantom_data: PhantomData
@@ -253,16 +253,16 @@ impl Store {
 
     // Unlink.
 
-    self.root = ptr::NULL;
+    self.root = ptr::null();
 
     // Free slabs.
 
     loop {
-      unsafe { global_free(curr_slab, curr_size - prev_size) };
+      unsafe { global_free(curr_slab.cast(), curr_size - prev_size) };
 
       if next_slab.is_null() { break; }
 
-      let head = unsafe { next_slab.as_ref::<Head>() };
+      let head = unsafe { next_slab.as_ref() };
       curr_slab = next_slab;
       next_slab = head.next;
       prev_size = curr_size;
@@ -274,15 +274,15 @@ impl Store {
     debug_assert!(curr_size <= MAX_SIZE);
 
     let size = ceil_pow2(curr_size);
-    let root = unsafe { global_alloc(size) };
+    let root = unsafe { global_alloc(size) }.cast::<Head>();
 
-    unsafe { ptr::write(root, Head { next: ptr::NULL, size }) };
+    unsafe { root.write(Head { next: ptr::null(), size }) };
 
     self.root = root;
 
     return Arena {
       span: Span {
-        tail: root + size,
+        tail: root.cast::<u8>() + size,
         size: size - size_of::<Head>()
       },
       _phantom_data: PhantomData
@@ -299,18 +299,18 @@ impl Drop for Store {
 
     // Unlink.
 
-    self.root = ptr::NULL;
+    self.root = ptr::null();
 
     // Free blocks.
 
     while ! next_slab.is_null() {
-      let head = unsafe { next_slab.as_ref::<Head>() };
+      let head = unsafe { next_slab.as_ref() };
       curr_slab = next_slab;
       next_slab = head.next;
       prev_size = curr_size;
       curr_size = head.size;
 
-      unsafe { global_free(curr_slab, curr_size - prev_size) };
+      unsafe { global_free(curr_slab.cast(), curr_size - prev_size) };
     }
   }
 }
@@ -328,7 +328,7 @@ impl core::fmt::Debug for Store {
     let mut list = alloc::vec::Vec::new();
 
     while ! slab.is_null() {
-      let head = unsafe { slab.as_ref::<Head>() };
+      let head = unsafe { slab.as_ref() };
       list.push(head.size - size);
       slab = head.next;
       size = head.size;
@@ -363,7 +363,7 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
 #[inline(never)]
 #[cold]
 unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
-  let head = unsafe { (span.tail - span.size - size_of::<Head>()).as_mut_ref::<Head>() };
+  let head = unsafe { (span.tail - span.size - size_of::<Head>()).cast::<Head>().as_mut_ref() };
   let span_out = span;
 
   // PROPOSITION
@@ -397,13 +397,13 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   debug_assert!(curr_size <= MAX_SIZE);
 
-  let p = unsafe { global_alloc(size) };
+  let p = unsafe { global_alloc(size) }.cast::<Head>();
 
-  unsafe { ptr::write(p, Head { next: ptr::NULL, size: curr_size }) };
+  unsafe { p.write(Head { next: ptr::null(), size: curr_size }) };
 
   head.next = p;
 
-  let span = Span { tail: p + size, size: size - size_of::<Head>() };
+  let span = Span { tail: p.cast::<u8>() + size, size: size - size_of::<Head>() };
   let span = unsafe { alloc_fast(span, layout).0 }; // Must succeed.
 
   *span_out = span;
@@ -411,7 +411,7 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
 impl<'a> Arena<'a> {
   #[inline(always)]
-  fn alloc_internal(&mut self, layout: Layout) -> ptr {
+  fn alloc_internal(&mut self, layout: Layout) -> ptr<u8> {
     let span =
       match unsafe { alloc_fast(self.span, layout) } {
         (span, true) => span,
@@ -439,7 +439,7 @@ impl<'a> Arena<'a> {
 
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
-    let x = self.alloc_internal(Layout::new::<T>());
+    let x = self.alloc_internal(Layout::new::<T>()).cast();
     Slot(unsafe { x.as_non_null() }, PhantomData)
   }
 
@@ -464,7 +464,7 @@ impl<'a> Arena<'a> {
     let align = align_of::<T>();
     let size = len * size_of::<T>();
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
-    let x = self.alloc_internal(layout);
+    let x = self.alloc_internal(layout).cast();
     Slot(unsafe { x.as_slice_non_null(len) }, PhantomData)
   }
 
@@ -482,9 +482,9 @@ impl<'a> Arena<'a> {
 
   #[inline(always)]
   pub fn copy_slice<T: Copy>(&mut self, src: &[T]) -> &'a mut [T] {
-    let x = self.alloc_internal(Layout::for_value(src));
+    let x = self.alloc_internal(Layout::for_value(src)).cast();
     let n = src.len();
-    unsafe { x.copy_from_nonoverlapping::<T>(ptr::from(src), n) };
+    unsafe { x.copy_from_nonoverlapping(ptr::from(src), n) };
     unsafe { x.as_slice_mut_ref(n) }
   }
 
@@ -563,14 +563,12 @@ impl<'a> core::fmt::Debug for Arena<'a> {
 //                                                                            //
 ////////////////////////////////////////////////////////////////////////////////
 
-impl<'a, T: ?Sized> Slot<'a, T> {
+impl<'a, T> Slot<'a, T> {
   #[inline(always)]
-  fn ptr(&self) -> ptr {
+  fn ptr(&self) -> ptr<T> {
     ptr::from(self.0)
   }
-}
 
-impl<'a, T> Slot<'a, T> {
   /// Converts the slot into a reference to an uninitialized value.
   ///
   /// ```
@@ -581,7 +579,7 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    unsafe { self.ptr().as_mut_ref() }
+    unsafe { self.ptr().cast().as_mut_ref() }
   }
 
   /// Initializes the slot with the given value.
@@ -612,7 +610,7 @@ impl<'a, T> Slot<'a, T> {
   pub fn init(self, value: T) -> &'a mut T {
     const { assert!(! core::mem::needs_drop::<T>()) };
 
-    unsafe { ptr::write(self.ptr(), value) };
+    unsafe { self.ptr().write(value) };
     unsafe { self.ptr().as_mut_ref() }
   }
 }
@@ -628,7 +626,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    unsafe { self.ptr().as_mut_ref() }
+    unsafe { self.ptr().cast().as_mut_ref() }
   }
 
   /// Initializes the array with values produced by calling the given function
@@ -651,14 +649,14 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
   {
     const { assert!(! core::mem::needs_drop::<T>()) };
 
-    let mut p = self.ptr();
+    let mut p = self.ptr().cast::<T>();
     let mut i = 0;
     let mut f = f;
 
     while i < N {
-      unsafe { ptr::write(p, f(i)) };
+      unsafe { p.write(f(i)) };
       i = i + 1;
-      p = p + size_of::<T>();
+      p = p + 1;
     }
 
     unsafe { self.ptr().as_mut_ref() }
@@ -666,6 +664,11 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 }
 
 impl<'a, T> Slot<'a, [T]> {
+  #[inline(always)]
+  fn ptr(&self) -> ptr<T> {
+    ptr::from(self.0)
+  }
+
   /// The length of the uninitialized slice.
   ///
   /// ```
@@ -689,7 +692,7 @@ impl<'a, T> Slot<'a, [T]> {
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    unsafe { self.ptr().as_slice_mut_ref(self.len()) }
+    unsafe { self.ptr().cast().as_slice_mut_ref(self.len()) }
   }
 
   /// Initializes the slice with values produced by calling the given function
@@ -717,9 +720,9 @@ impl<'a, T> Slot<'a, [T]> {
     let mut f = f;
 
     while i < self.len() {
-      unsafe { ptr::write(p, f(i)) };
+      unsafe { p.write(f(i)) };
       i = i + 1;
-      p = p + size_of::<T>();
+      p = p + 1;
     }
 
     unsafe { self.ptr().as_slice_mut_ref(self.len()) }
