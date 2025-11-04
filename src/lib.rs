@@ -104,17 +104,17 @@ const MAX_SIZE: usize = 1 << BITS - 2;
 fn ceil_pow2(x: usize) -> usize {
   debug_assert!(1 <= x && x <= 1 << BITS - 1);
 
-  1 << BITS - (x - 1).leading_zeros()
+  return 1 << BITS - (x - 1).leading_zeros();
 }
 
 #[inline(always)]
 fn min(x: usize, y: usize) -> usize {
-  if x <= y { x } else { y }
+  return if x <= y { x } else { y };
 }
 
 #[inline(always)]
 fn max(x: usize, y: usize) -> usize {
-  if x >= y { x } else { y }
+  return if x >= y { x } else { y };
 }
 
 // SAFETY
@@ -127,13 +127,9 @@ unsafe fn global_alloc(size: usize) -> ptr<u8> {
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  let p = unsafe { ptr::from(alloc::alloc::alloc(layout)) };
+  let Ok(p) = unsafe { pop::alloc(layout) };
 
-  if p.is_null() {
-    panic!("oxcart: Allocating with the global allocator failed!")
-  }
-
-  p
+  return p;
 }
 
 // SAFETY
@@ -146,7 +142,7 @@ unsafe fn global_free(p: ptr<u8>, size: usize) {
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  unsafe { alloc::alloc::dealloc(p.as_mut_ptr(), layout) };
+  unsafe { pop::dealloc(p, layout) };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -165,7 +161,7 @@ impl Store {
   /// ```
 
   pub const fn new() -> Self {
-    Store { root: ptr::null() }
+    return Store { root: ptr::null() };
   }
 
   /// Creates a new store and pre-allocates approximately `size` bytes of
@@ -188,7 +184,7 @@ impl Store {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
     let root = unsafe { global_alloc(size) }.cast::<Head>();
     unsafe { root.write(Head { next: ptr::null(), size }) };
-    Store { root }
+    return Store { root };
   }
 
   /// Prepares an arena.
@@ -317,7 +313,7 @@ impl Drop for Store {
 
 impl Default for Store {
   fn default() -> Self {
-    Store::new()
+    return Store::new();
   }
 }
 
@@ -336,7 +332,7 @@ impl core::fmt::Debug for Store {
 
     let list = list.into_boxed_slice();
 
-    f.debug_tuple("Store").field(&list).finish()
+    return f.debug_tuple("Store").field(&list).finish();
   }
 }
 
@@ -357,7 +353,7 @@ unsafe fn alloc_fast(span: Span, layout: Layout) -> (Span, bool) {
 
   let d = s + (p.addr().wrapping_sub(s) & (a - 1 | QUANTUM - 1));
 
-  (Span { tail: p - d, size: n.wrapping_sub(d) }, d <= n)
+  return (Span { tail: p - d, size: n.wrapping_sub(d) }, d <= n);
 }
 
 #[inline(never)]
@@ -422,7 +418,7 @@ impl<'a> Arena<'a> {
         }
       };
     self.span = span;
-    span.tail
+    return span.tail;
   }
 
   /// Allocates memory for a single value.
@@ -440,7 +436,7 @@ impl<'a> Arena<'a> {
   #[inline(always)]
   pub fn alloc<T>(&mut self) -> Slot<'a, T> {
     let x = self.alloc_internal(Layout::new::<T>()).cast();
-    Slot(unsafe { x.as_non_null() }, PhantomData)
+    return Slot(unsafe { x.as_non_null() }, PhantomData);
   }
 
   /// Allocates memory for a slice of the given length.
@@ -465,7 +461,7 @@ impl<'a> Arena<'a> {
     let size = len * size_of::<T>();
     let layout = unsafe { Layout::from_size_align_unchecked(size, align) };
     let x = self.alloc_internal(layout).cast();
-    Slot(unsafe { x.as_slice_non_null(len) }, PhantomData)
+    return Slot(unsafe { x.as_slice_non_null(len) }, PhantomData);
   }
 
   /// Copies the given slice into a new allocation.
@@ -485,7 +481,7 @@ impl<'a> Arena<'a> {
     let x = self.alloc_internal(Layout::for_value(src)).cast();
     let n = src.len();
     unsafe { x.copy_from_nonoverlapping(ptr::from(src), n) };
-    unsafe { x.as_slice_mut_ref(n) }
+    return unsafe { x.as_slice_mut_ref(n) };
   }
 
   /// Copies the given string into a new allocation.
@@ -503,7 +499,7 @@ impl<'a> Arena<'a> {
   #[inline(always)]
   pub fn copy_str(&mut self, src: &str) -> &'a mut str {
     let x = self.copy_slice(src.as_bytes());
-    unsafe { core::str::from_utf8_unchecked_mut(x) }
+    return unsafe { core::str::from_utf8_unchecked_mut(x) };
   }
 
   /// Given an [ExactSizeIterator], allocates an appropriately sized slice and
@@ -527,7 +523,7 @@ impl<'a> Arena<'a> {
     let x = self.alloc_slice(iter.len());
     let x = x.init_slice(|_| iter.next().unwrap());
     assert!(iter.next().is_none());
-    x
+    return x;
   }
 
   /// Allocates memory for the given layout. The memory is valid for the
@@ -547,13 +543,13 @@ impl<'a> Arena<'a> {
   #[inline(always)]
   pub fn alloc_layout(&mut self, layout: Layout) -> NonNull<u8> {
     let x = self.alloc_internal(layout);
-    unsafe { x.as_non_null() }
+    return unsafe { x.as_non_null() };
   }
 }
 
 impl<'a> core::fmt::Debug for Arena<'a> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Arena").field(&self.span.size).finish()
+    return f.debug_tuple("Arena").field(&self.span.size).finish();
   }
 }
 
@@ -566,7 +562,7 @@ impl<'a> core::fmt::Debug for Arena<'a> {
 impl<'a, T> Slot<'a, T> {
   #[inline(always)]
   fn ptr(&self) -> ptr<T> {
-    ptr::from(self.0)
+    return ptr::from(self.0);
   }
 
   /// Converts the slot into a reference to an uninitialized value.
@@ -579,7 +575,7 @@ impl<'a, T> Slot<'a, T> {
 
   #[inline(always)]
   pub fn as_uninit(self) -> &'a mut MaybeUninit<T> {
-    unsafe { self.ptr().cast().as_mut_ref() }
+    return unsafe { self.ptr().cast().as_mut_ref() };
   }
 
   /// Initializes the slot with the given value.
@@ -611,7 +607,7 @@ impl<'a, T> Slot<'a, T> {
     const { assert!(! core::mem::needs_drop::<T>()) };
 
     unsafe { self.ptr().write(value) };
-    unsafe { self.ptr().as_mut_ref() }
+    return unsafe { self.ptr().as_mut_ref() };
   }
 }
 
@@ -626,7 +622,7 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
 
   #[inline(always)]
   pub fn as_uninit_array(self) -> &'a mut [MaybeUninit<T>; N] {
-    unsafe { self.ptr().cast().as_mut_ref() }
+    return unsafe { self.ptr().cast().as_mut_ref() };
   }
 
   /// Initializes the array with values produced by calling the given function
@@ -659,14 +655,14 @@ impl<'a, T, const N: usize> Slot<'a, [T; N]> {
       p = p + 1;
     }
 
-    unsafe { self.ptr().as_mut_ref() }
+    return unsafe { self.ptr().as_mut_ref() };
   }
 }
 
 impl<'a, T> Slot<'a, [T]> {
   #[inline(always)]
   fn ptr(&self) -> ptr<T> {
-    ptr::from(self.0)
+    return ptr::from(self.0);
   }
 
   /// The length of the uninitialized slice.
@@ -679,7 +675,7 @@ impl<'a, T> Slot<'a, [T]> {
 
   #[inline(always)]
   pub fn len(&self) -> usize {
-    self.0.len()
+    return self.0.len();
   }
 
   /// Converts the slot into a reference to a slice of uninitialized values.
@@ -692,7 +688,7 @@ impl<'a, T> Slot<'a, [T]> {
 
   #[inline(always)]
   pub fn as_uninit_slice(self) -> &'a mut [MaybeUninit<T>] {
-    unsafe { self.ptr().cast().as_slice_mut_ref(self.len()) }
+    return unsafe { self.ptr().cast().as_slice_mut_ref(self.len()) };
   }
 
   /// Initializes the slice with values produced by calling the given function
@@ -725,18 +721,18 @@ impl<'a, T> Slot<'a, [T]> {
       p = p + 1;
     }
 
-    unsafe { self.ptr().as_slice_mut_ref(self.len()) }
+    return unsafe { self.ptr().as_slice_mut_ref(self.len()) };
   }
 }
 
 impl<'a, T> core::fmt::Debug for Slot<'a, T> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Slot").finish()
+    return f.debug_tuple("Slot").finish();
   }
 }
 
 impl<'a, T> core::fmt::Debug for Slot<'a, [T]> {
   fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-    f.debug_tuple("Slot").field(&self.len()).finish()
+    return f.debug_tuple("Slot").field(&self.len()).finish();
   }
 }
