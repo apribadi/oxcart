@@ -7,7 +7,7 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
-use pop::v2::ptr;
+use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
