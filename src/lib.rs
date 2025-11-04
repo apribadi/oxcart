@@ -39,13 +39,17 @@ pub struct Arena<'a> {
 
 pub struct Slot<'a, T: ?Sized>(NonNull<T>, PhantomData<fn(T) -> &'a ()>);
 
-unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> { }
+unsafe impl<'a, T: ?Sized> Send for Slot<'a, T> {
+}
 
-unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> { }
+unsafe impl<'a, T: ?Sized> Sync for Slot<'a, T> {
+}
 
-impl <'a, T: ?Sized> core::panic::UnwindSafe for Slot<'a, T> { }
+impl <'a, T: ?Sized> core::panic::RefUnwindSafe for Slot<'a, T> {
+}
 
-impl <'a, T: ?Sized> core::panic::RefUnwindSafe for Slot<'a, T> { }
+impl <'a, T: ?Sized> core::panic::UnwindSafe for Slot<'a, T> {
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 //                                                                            //
