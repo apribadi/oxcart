@@ -29,7 +29,7 @@ pub struct Store {
 
 pub struct Arena<'a> {
   span: Span,
-  _phantom_data: PhantomData<&'a ()>
+  phantom_data: PhantomData<&'a ()>
 }
 
 /// A `Slot<'a, T>` refers to uninitialized memory with lifetime `'a` which can
@@ -221,7 +221,7 @@ impl Store {
           tail: root.cast::<u8>() + SIZE,
           size: SIZE - size_of::<Head>()
         },
-        _phantom_data: PhantomData
+        phantom_data: PhantomData
       };
     }
 
@@ -237,7 +237,7 @@ impl Store {
           tail: self.root.cast::<u8>() + size,
           size: size - size_of::<Head>()
         },
-        _phantom_data: PhantomData
+        phantom_data: PhantomData
       };
     }
 
@@ -282,7 +282,7 @@ impl Store {
         tail: root.cast::<u8>() + size,
         size: size - size_of::<Head>()
       },
-      _phantom_data: PhantomData
+      phantom_data: PhantomData
     };
   }
 }
