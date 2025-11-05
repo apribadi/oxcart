@@ -7,6 +7,7 @@ use core::alloc::Layout;
 use core::marker::PhantomData;
 use core::mem::MaybeUninit;
 use core::ptr::NonNull;
+use pop::global;
 use pop::ptr;
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -127,7 +128,7 @@ unsafe fn global_alloc(size: usize) -> ptr<u8> {
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  let Ok(p) = unsafe { pop::alloc(layout) };
+  let Ok(p) = unsafe { global::alloc(layout) };
 
   return p;
 }
@@ -142,7 +143,7 @@ unsafe fn global_free(p: ptr<u8>, size: usize) {
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  unsafe { pop::dealloc(p, layout) };
+  unsafe { global::dealloc(p, layout) };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
