@@ -123,7 +123,7 @@ fn max(x: usize, y: usize) -> usize {
 // - A `Layout` with this `size` and `align == QUANTUM` must be valid.
 // - The `size` must be non-zero.
 
-unsafe fn global_alloc(size: usize) -> ptr<u8> {
+unsafe fn global_alloc<T>(size: usize) -> ptr<T> {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
@@ -138,7 +138,7 @@ unsafe fn global_alloc(size: usize) -> ptr<u8> {
 // - The pointer `p` must refer to a currently allocated region that was
 //   allocated with this `size` and `align == QUANTUM`.
 
-unsafe fn global_free(p: ptr<u8>, size: usize) {
+unsafe fn global_free<T>(p: ptr<T>, size: usize) {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
@@ -183,7 +183,7 @@ impl Store {
 
   pub fn with_capacity(size: usize) -> Self {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
-    let root = unsafe { global_alloc(size) }.cast::<Head>();
+    let root = unsafe { global_alloc(size) };
     unsafe { root.write(Head { next: ptr::null(), size }) };
     return Store { root };
   }
@@ -210,7 +210,7 @@ impl Store {
 
       const SIZE: usize = 1 << 16;
 
-      let root = unsafe { global_alloc(SIZE) }.cast::<Head>();
+      let root = unsafe { global_alloc(SIZE) };
 
       unsafe { root.write(Head { next: ptr::null(), size: SIZE }) };
 
@@ -255,7 +255,7 @@ impl Store {
     // Free slabs.
 
     loop {
-      unsafe { global_free(curr_slab.cast(), curr_size - prev_size) };
+      unsafe { global_free(curr_slab, curr_size - prev_size) };
 
       if next_slab.is_null() { break; }
 
@@ -271,7 +271,7 @@ impl Store {
     debug_assert!(curr_size <= MAX_SIZE);
 
     let size = ceil_pow2(curr_size);
-    let root = unsafe { global_alloc(size) }.cast::<Head>();
+    let root = unsafe { global_alloc(size) };
 
     unsafe { root.write(Head { next: ptr::null(), size }) };
 
@@ -307,7 +307,7 @@ impl Drop for Store {
       prev_size = curr_size;
       curr_size = head.size;
 
-      unsafe { global_free(curr_slab.cast(), curr_size - prev_size) };
+      unsafe { global_free(curr_slab, curr_size - prev_size) };
     }
   }
 }
@@ -394,7 +394,7 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   debug_assert!(curr_size <= MAX_SIZE);
 
-  let p = unsafe { global_alloc(size) }.cast::<Head>();
+  let p = unsafe { global_alloc(size) };
 
   unsafe { p.write(Head { next: ptr::null(), size: curr_size }) };
 
