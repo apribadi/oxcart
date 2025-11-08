@@ -218,7 +218,7 @@ impl Store {
 
       return Arena {
         span: Span {
-          tail: root.cast::<u8>() + SIZE,
+          tail: root.byte_add(SIZE),
           size: SIZE - size_of::<Head>()
         },
         _phantom_data: PhantomData
@@ -234,7 +234,7 @@ impl Store {
 
       return Arena {
         span: Span {
-          tail: self.root.cast::<u8>() + size,
+          tail: self.root.byte_add(size),
           size: size - size_of::<Head>()
         },
         _phantom_data: PhantomData
@@ -279,7 +279,7 @@ impl Store {
 
     return Arena {
       span: Span {
-        tail: root.cast::<u8>() + size,
+        tail: root.byte_add(size),
         size: size - size_of::<Head>()
       },
       _phantom_data: PhantomData
@@ -400,7 +400,7 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   head.next = p;
 
-  let span = Span { tail: p.cast::<u8>() + size, size: size - size_of::<Head>() };
+  let span = Span { tail: p.byte_add(size), size: size - size_of::<Head>() };
   let span = unsafe { alloc_fast(span, layout).0 }; // Must succeed.
 
   *span_out = span;
