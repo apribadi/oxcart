@@ -128,7 +128,7 @@ unsafe fn global_alloc<T>(size: usize) -> ptr<T> {
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  let Ok(p) = unsafe { global::alloc(layout) };
+  let p = unsafe { global::alloc_layout(layout) };
 
   return p;
 }
@@ -138,12 +138,12 @@ unsafe fn global_alloc<T>(size: usize) -> ptr<T> {
 // - The pointer `p` must refer to a currently allocated region that was
 //   allocated with this `size` and `align == QUANTUM`.
 
-unsafe fn global_free<T>(p: ptr<T>, size: usize) {
+unsafe fn global_dealloc<T>(p: ptr<T>, size: usize) {
   debug_assert!(Layout::from_size_align(size, QUANTUM).is_ok());
   debug_assert!(size != 0);
 
   let layout = unsafe { Layout::from_size_align_unchecked(size, QUANTUM) };
-  unsafe { global::dealloc(p, layout) };
+  unsafe { global::dealloc_layout(p, layout) };
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -255,7 +255,7 @@ impl Store {
     // Free slabs.
 
     loop {
-      unsafe { global_free(curr_slab, curr_size - prev_size) };
+      unsafe { global_dealloc(curr_slab, curr_size - prev_size) };
 
       if next_slab.is_null() { break; }
 
@@ -307,7 +307,7 @@ impl Drop for Store {
       prev_size = curr_size;
       curr_size = head.size;
 
-      unsafe { global_free(curr_slab, curr_size - prev_size) };
+      unsafe { global_dealloc(curr_slab, curr_size - prev_size) };
     }
   }
 }
