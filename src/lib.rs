@@ -162,7 +162,7 @@ impl Store {
   /// ```
 
   pub const fn new() -> Self {
-    return Store { root: ptr::null() };
+    return Store { root: ptr::NULL };
   }
 
   /// Creates a new store and pre-allocates approximately `size` bytes of
@@ -184,7 +184,7 @@ impl Store {
   pub fn with_capacity(size: usize) -> Self {
     let size = ceil_pow2(min(max(size, size_of::<Head>() + 1), MAX_SIZE));
     let root = unsafe { global_alloc(size) };
-    unsafe { root.write(Head { next: ptr::null(), size }) };
+    unsafe { root.write(Head { next: ptr::NULL, size }) };
     return Store { root };
   }
 
@@ -212,7 +212,7 @@ impl Store {
 
       let root = unsafe { global_alloc(SIZE) };
 
-      unsafe { root.write(Head { next: ptr::null(), size: SIZE }) };
+      unsafe { root.write(Head { next: ptr::NULL, size: SIZE }) };
 
       self.root = root;
 
@@ -250,7 +250,7 @@ impl Store {
 
     // Unlink.
 
-    self.root = ptr::null();
+    self.root = ptr::NULL;
 
     // Free slabs.
 
@@ -273,7 +273,7 @@ impl Store {
     let size = ceil_pow2(curr_size);
     let root = unsafe { global_alloc(size) };
 
-    unsafe { root.write(Head { next: ptr::null(), size }) };
+    unsafe { root.write(Head { next: ptr::NULL, size }) };
 
     self.root = root;
 
@@ -296,7 +296,7 @@ impl Drop for Store {
 
     // Unlink.
 
-    self.root = ptr::null();
+    self.root = ptr::NULL;
 
     // Free blocks.
 
@@ -396,7 +396,7 @@ unsafe fn alloc_slow(span: &mut Span, layout: Layout) {
 
   let p = unsafe { global_alloc(size) };
 
-  unsafe { p.write(Head { next: ptr::null(), size: curr_size }) };
+  unsafe { p.write(Head { next: ptr::NULL, size: curr_size }) };
 
   head.next = p;
 
